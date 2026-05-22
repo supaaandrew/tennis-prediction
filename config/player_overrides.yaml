@@ -1,0 +1,27 @@
+# ============================================================================
+# Player identity overrides
+# ============================================================================
+# Hand-curated mappings for cases where the automatic resolver in
+# agents/data/resolver.py cannot pick a winner — typically because two
+# different real players normalize to the same alias, or because a source
+# uses an idiosyncratic spelling the fuzzy matcher won't catch.
+#
+# Loaded at resolver-init time, applied with `confidence='manual'` (which
+# wins over fuzzy and exact). Never edit player_aliases rows by hand at the
+# database level — make the entry here and let the resolver write it.
+#
+# Schema:
+#
+# overrides:
+#   - alias:        "ndjokovic"                # already-normalized form
+#     source:       "reddit"                    # source-scoped
+#     sackmann_atp_id: "104925"                 # canonical link
+#     dob:          "1987-05-22"                # optional sanity check
+#     country_code: "SRB"                       # optional sanity check
+#     note:         "Reddit thread shorthand, no whitespace"
+#
+# Empty for v1 — entries get added as the Data Agent surfaces ambiguities
+# in dead_letter.
+# ============================================================================
+
+overrides: []

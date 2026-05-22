@@ -1,0 +1,41 @@
+# Create .gitignore with everything you need
+@"
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Cache
+.cache/
+.pytest_cache/
+*.cache
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model artifacts
+*.pkl
+*.joblib
+*.pt
+*.pth
+
+# Data cache
+data/
+*.csv
+"@ | Out-File -FilePath .gitignore -Encoding utf8

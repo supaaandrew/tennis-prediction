@@ -1,0 +1,302 @@
+# ============================================================================
+# Tennis Prediction Bot — primary configuration
+# ============================================================================
+# Every threshold, URL, window, and hyperparameter lives here.
+# Secrets do NOT live here — only the *name* of the env var they sit in,
+# referenced via fields ending in `_env`. core.config.validate_environment
+# fails loudly at startup if any required env var is missing.
+# All timestamps are UTC.
+# ============================================================================
+
+app:
+  env: dev                              # dev | staging | prod
+  timezone: "UTC"
+  run_id_prefix: "tennis"
+
+logging:
+  level: INFO
+  json: true
+  redact_keys:
+    - api_key
+    - apikey
+    - authorization
+    - password
+    - secret
+    - token
+    - cookie
+
+database:
+  url_env: DATABASE_URL                 # required in every env
+  pool_size: 10
+  max_overflow: 5
+  statement_timeout_ms: 30000
+  migrations_dir: "migrations"
+
+qdrant:
+  url_env: QDRANT_URL                   # required in prod
+  api_key_env: QDRANT_API_KEY           # optional locally; required in prod
+  api_key_required: false
+  collections:
+    match_notes:
+      vector_size: 1024
+      distance: cosine
+      hnsw_m: 32
+      hnsw_ef_construct: 256
+      payload_indexes:
+        - { field: match_date, schema: datetime }
+        - { field: surface,    schema: keyword  }
+        - { field: tier,       schema: keyword  }
+        - { field: players,    schema: keyword  }
+    model_cards:
+      vector_size: 1024
+      distance: cosine
+
+embeddings:
+  provider: voyage
+  model: voyage-3-large
+  api_key_env: VOYAGE_API_KEY           # required in prod
+  dim: 1024
+  batch_size: 64
+
+# ---------------------------------------------------------------------------
+# External data sources
+# ---------------------------------------------------------------------------
+sources:
+  sackmann:
+    repo: "JeffSackmann/tennis_atp"
+    branch: "master"
+    files:
+      matches_glob: "atp_matches_{year}.csv"
+      rankings_glob: "atp_rankings_{decade}s.csv"
+      players_file: "atp_players.csv"
+    cache_dir: ".cache/sackmann"
+    local_mirror_dir: ".cache/sackmann/mirror"   # full repo snapshot per pull
+    pin_commit_sha: null                          # set to a SHA to lock a known-good revision
+    max_staleness_days: 3                         # halts pipeline loudly if last pull older
+
+  atp_scraper:
+    base_url: "https://www.atptour.com"
+    user_agent: "tennis-bot/1.0 (+contact)"
+    request_timeout_s: 30
+    rate_limit_rps: 0.5
+    lookback_days: 21
+
+  openweather:
+    base_url: "https://api.openweathermap.org"
+    api_key_env: OPENWEATHER_API_KEY    # required in prod
+    historical_endpoint: "/data/3.0/onecall/timemachine"
+    forecast_endpoint:   "/data/3.0/onecall"
+    rate_limit_rps: 1.0
+
+  odds_api:
+    base_url: "https://api.the-odds-api.com/v4"
+    api_key_env: ODDS_API_KEY           # required in prod
+    sport: "tennis_atp"
+    bookmakers: ["pinnacle", "betfair_ex_eu", "betfair_ex_uk"]
+    rate_limit_rps: 1.0
+    closing_window_minutes: 15          # snapshot ≤ N min before start_ts == "closing"
+
+# ---------------------------------------------------------------------------
+# Ingestion behavior (Data Agent)
+# ---------------------------------------------------------------------------
+ingestion:
+  history_backfill_seasons: [2000, 2026]
+  daily_lookforward_days: 7
+  retry:
+    max_attempts: 5
+    base_delay_s: 2
+    max_delay_s: 60
+  dead_letter_table: "dead_letter"
+  intraday_conflict:
+    enabled: true                       # post-ingest pass on matches per date
+    log_to_run_metrics: true            # audit-only; never gates training
+
+# ---------------------------------------------------------------------------
+# Feature engineering (Research Agent)
+# ---------------------------------------------------------------------------
+features:
+  feature_set: "v1"
+  windows_days: [7, 14, 30, 90, 365]
+  elo:
+    k_base: 32
+    surface_blend: 0.5
+    glicko: false
+  market:
+    # Shin is primary, proportional is fallback. Both reported in metrics.
+    devig_method_primary:  "shin"
+    devig_method_fallback: "proportional"
+    use_closing_for_backtest: true
+    track_odds_drift_to_close: true     # backtest-only; null in live context
+  weather:
+    # Train-time noise injection bucketed by forecast uncertainty.
+    inject_forecast_noise: true
+    uncertainty_buckets: ["low", "medium", "high"]
+    noise_sigma_by_bucket:
+      low:    { temp_c: 0.5, humidity_pct: 2.0, wind_speed_ms: 0.5 }
+      medium: { temp_c: 1.5, humidity_pct: 5.0, wind_speed_ms: 1.5 }
+      high:   { temp_c: 3.0, humidity_pct: 10.0, wind_speed_ms: 3.0 }
+  drift:
+    psi_threshold: 0.2
+    ks_alpha: 0.01
+
+# ---------------------------------------------------------------------------
+# Modeling (Modeling Agent)
+# ---------------------------------------------------------------------------
+modeling:
+  splits:
+    method: "walk_forward"
+    n_folds: 6
+    min_train_seasons: 8
+    embargo_by: "tournament_id"         # NOT days — embargo by tournament boundary
+  base_learners:
+    xgb:
+      n_estimators: 800
+      max_depth: 6
+      learning_rate: 0.05
+      subsample: 0.8
+      colsample_bytree: 0.8
+      reg_lambda: 1.0
+      tree_method: "hist"
+    lgbm:
+      n_estimators: 800
+      num_leaves: 63
+      learning_rate: 0.05
+      feature_fraction: 0.8
+      bagging_fraction: 0.8
+      lambda_l2: 1.0
+  meta_learner:
+    type: "logistic"
+    C: 1.0
+  calibration:
+    # Nested scheme: base learners → OOF preds → stacker → calibration on a
+    # dedicated held-out tail set. Tail is the LAST N days of training data
+    # and is NOT used to fit base learners or the stacker.
+    method: "platt"
+    tail_days: 60
+  metrics:
+    primary: "logloss"
+    secondary: ["brier", "ece", "roi_kelly", "roi_kelly_shin", "roi_kelly_proportional"]
+  edge:
+    min_edge_to_log: 0.01
+    min_edge_to_bet: 0.03
+    allow_missing_odds: true              # write prediction with NULL edges; never skip
+  kelly:
+    fraction: 0.25
+    max_exposure_pct: 0.02
+
+# ---------------------------------------------------------------------------
+# Decision-time timing
+# ---------------------------------------------------------------------------
+decision_timing:
+  # Daily morning briefing covering the next 24h slate. A single daily cron
+  # CANNOT guarantee a uniform T-24h decision window across global
+  # tournaments — Australian Open early matches may end up at ~T-30h. This
+  # is an accepted v1 limitation; see DECISIONS.md.
+  live_decision_offset_hours: 24
+  backtest_use_closing_line: true       # most honest ROI for retrospective eval
+
+# ---------------------------------------------------------------------------
+# Briefing (Briefing Agent)
+# ---------------------------------------------------------------------------
+briefing:
+  llm:
+    provider: anthropic
+    model: "claude-sonnet-4-6"
+    max_tokens: 4096
+    temperature: 0.2
+    api_key_env: ANTHROPIC_API_KEY      # required in prod
+  rag:
+    top_k: 8
+    filters:
+      same_surface: true
+      max_age_days: 365
+    prefer_human_edited_notes: true     # avoid LLM feedback loop
+  email:
+    smtp:
+      host_env: SMTP_HOST               # required in prod
+      port: 587
+      user_env: SMTP_USER               # required in prod
+      password_env: SMTP_PASSWORD       # required in prod
+      from: "tennis-bot@example.com"
+      tls: true
+    recipients_env: BRIEFING_RECIPIENTS  # required in prod
+    subject_template: "Tennis edges — {date}"
+  kelly_disclaimer: "For research purposes only. Not financial or betting advice."
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+orchestrator:
+  cron: "30 6 * * *"                    # 06:30 UTC daily morning briefing
+  steps_timeout_s:
+    data:     1800
+    research: 1200
+    modeling: 3600
+    briefing:  600
+    monitor:   300
+  on_failure: "halt_and_alert"
+  run_monitor_post_briefing: true
+  heartbeat:
+    interval_s: 30                      # cadence orchestrator updates pipeline_runs.last_heartbeat_at
+    orphan_after_s: 300                 # status='running' rows silent longer than this are reaped
+  orphan_sweep_on_start: true           # mark orphans failed before kicking off a new run
+
+# ---------------------------------------------------------------------------
+# Production monitoring (post-briefing step)
+# ---------------------------------------------------------------------------
+monitor:
+  windows_days: [30, 60, 90]
+  calibration:
+    ece_threshold_warn:  0.05
+    ece_threshold_alert: 0.10
+  drift:
+    psi_threshold_warn:  0.10
+    psi_threshold_alert: 0.20
+    ks_alpha: 0.01
+  output:
+    write_to_pipeline_runs: true        # metrics in pipeline_runs.metrics JSONB
+
+# ---------------------------------------------------------------------------
+# Policy — tournament inclusion + match status filters
+# Centralized so no agent re-implements these. MatchRepository exposes
+# named filters (for_training, for_prediction) that read this section.
+# ---------------------------------------------------------------------------
+policy:
+  tournaments:
+    included_tiers:
+      - GS
+      - Masters1000
+      - ATP500
+      - ATP250
+    excluded_categories:                # listed for documentation only
+      - Davis Cup
+      - Olympics
+      - Exhibitions
+      - Challengers
+      - Futures
+      - Laver Cup
+      - ATP Cup
+  match_status:
+    training:    ["final"]              # only completed matches enter training
+    prediction:  ["scheduled", "live"]  # only upcoming matches get predictions
+
+# ---------------------------------------------------------------------------
+# Player identity resolution
+# Resolution priority (in agents/data/resolver.py):
+#   1. Exact match on normalized alias
+#   2. DOB + country_code tiebreaker
+#   3. Fuzzy match above `fuzzy_threshold`
+#   4. Manual override from `overrides_file`
+# ---------------------------------------------------------------------------
+player_resolution:
+  overrides_file: "config/player_overrides.yaml"
+  fuzzy_threshold: 0.92                 # rapidfuzz token-set ratio / 100
+  require_dob_for_fuzzy: true           # never accept a fuzzy match without DOB tiebreaker
+
+# ---------------------------------------------------------------------------
+# Feature engineering policy knobs read by extractors. NEVER hardcoded.
+# ---------------------------------------------------------------------------
+feature_engineering:
+  retirement_counts_as_match: true      # walked on court, counts toward fatigue
+  walkover_counts_as_match: false       # no play, no fatigue
+  retirement_fatigue_weight: 0.5        # partial-match credit for retirements

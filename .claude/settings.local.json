@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(New-Item *)",
+      "PowerShell(py *)",
+      "PowerShell(& \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install --quiet pydantic pydantic-settings structlog pyyaml pytest 2>&1 | Select-Object -Last 10)",
+      "PowerShell($env:PYTHONPATH = \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\src\"; & \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\.venv\\\\Scripts\\\\python.exe\" -m pytest \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\tests\\\\unit\\\\core\" -v 2>&1 | Select-Object -Last 80)",
+      "PowerShell($env:PYTHONPATH = \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\src\"; & \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\.venv\\\\Scripts\\\\python.exe\" -m pytest \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\tests\\\\unit\\\\core\" -q 2>&1 | Select-Object -Last 30)",
+      "PowerShell($env:PYTHONPATH = \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\src\"; & \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\.venv\\\\Scripts\\\\python.exe\" -m pytest \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\tests\\\\unit\\\\core\" -q 2>&1 | Select-Object -Last 20)",
+      "PowerShell(& \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\.venv\\\\Scripts\\\\python.exe\" -m py_compile \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\migrations\\\\versions\\\\008_player_aliases.py\" \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\migrations\\\\versions\\\\009_run_lineage.py\"; if \\($?\\) { \"008+009 compile cleanly\" })",
+      "PowerShell($env:PYTHONPATH = \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\src\"; & \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\.venv\\\\Scripts\\\\python.exe\" -c \"from tennis import core; print\\('OK'\\); print\\([n for n in core.__all__ if n in \\('normalize_player_name','HeartbeatPolicy','Precondition','PreconditionNotMetError','FeatureMatrixValidationError','SackmannStalenessError'\\)]\\)\")",
+      "PowerShell($env:PYTHONPATH = \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\src\"; & \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\.venv\\\\Scripts\\\\python.exe\" -c \"from tennis.agents.research import FeatureMatrixValidator, FeatureSpec; from tennis.core.contracts import Precondition, HeartbeatPolicy, AgentLineage; print\\('OK'\\)\")",
+      "PowerShell($env:PYTHONPATH = \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\src\"; & \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\.venv\\\\Scripts\\\\python.exe\" -m pytest \"C:\\\\Users\\\\Andrew\\\\Documents\\\\Tennis_Prediction_Bot\\\\tests\" -q 2>&1 | Select-Object -Last 30)"
+    ]
+  }
+}
