@@ -407,6 +407,52 @@ Idempotent (re-normalizing produces same string). Locked examples pinned in
 | F3 | Logging tests use `capsys` not `redirect_stdout` | stdlib logging output isn't routed through Python-level stdout redirection. |
 | F4 | Migrations use raw `op.execute()` SQL (not autogenerate) | Triggers, CHECK constraints, JSONB defaults need raw SQL anyway; ORM is reconciled by tests, not auto-diff. |
 
+## G. (intentionally skipped)
+
+The letter G is unused. The pre-implementation audit batch was authored
+as Section H without a Section G between F and H; rather than renumber
+H1–H12 (which would invalidate every config-comment cross-reference and
+the `test_h_audit_fixes_present` regression test), the gap is documented
+here. New decision batches resume at I.
+
+## H. Pre-implementation audit fixes (Day 3 — before Data Agent)
+
+A pre-implementation audit caught 20+ blocking issues across config, spec,
+and migrations *before* any agent code was written. Part 1 (config + pydantic)
+is below; Part 2 (migrations 010-012) follows in a separate change.
+
+| # | Decision | Rationale |
+|---|---|---|
+| H1 | Noise injection moves to Modeling Agent training loop, NOT feature storage. `feature_matrix` always stores clean values. Noise is injected immediately before fitting each base learner, never written to Postgres. | Storing noisy values permanently violates reproducibility — retraining on the same feature_matrix rows produces different results depending on when each row was first written. |
+| H2 | `history_backfill_seasons` renamed to `history_backfill_season_range: {start: int, end: int}`. Old list form was ambiguous (2-element list vs range). | Silent interpretation differences produce either 24 missing years of data or 24 extra ingestion failures. |
+| H3 | Match date reconciliation: when Sackmann and ATP scraper disagree on `match_date`, Sackmann is canonical for `status=final`, ATP scraper is canonical for `scheduled/live`. `match_date_source` column (migration 012) records which source was used in the hash. | Different dates → different `match_id` hashes → two rows for the same logical match, breaking all feature joins. |
+| H4 | Weather uncertainty bucket thresholds are explicit in config: `low=[0,6]h`, `medium=[6,24]h`, `high=[24,168]h` based on `forecast_horizon_h`. Missing observations emit `weather_missing=True` and NULL features — no climatological fallback in v1. | Without thresholds every implementation guesses independently, producing inconsistent feature values across runs. |
+| H5 | OWM historical backfill uses `/data/3.0/onecall/day_summary` endpoint, NOT `timemachine`. In v3.0, `timemachine` returns one timestamp per call (not a full day like v2.5). `day_summary` returns daily aggregation in 1 call. | Using `timemachine` for daily backfill costs 24× more API calls for identical data. |
+| H6 | `player_aliases` table (migration 008) is the sole source of truth for alias resolution. `players.aliases` JSONB is deprecated — must not be written after Data Agent launches. Kept in schema for migration safety only. | Two alias stores with no sync contract diverge on first reconciliation run. |
+| H7 | Elo snapshots materialized in `elo_snapshots` table (migration 011): `(player_id, surface, elo_rating, as_of_ts)`. Research Agent writes a row after each match is processed. Opponent-adjusted form joins this table for PIT-safe pre-match Elo. | Retroactive Elo recomputation leaks match outcomes into pre-match features. |
+| H8 | `best_of` NULL fallback by tier: GS=5, all others=3. Config-driven via `feature_engineering.best_of_null_fallback_by_tier`. | Pre-2000 Sackmann records frequently omit `best_of`; without a fallback, bo5 set-weighting silently uses wrong denominator. |
+| H9 | `devig_method` check constraint corrected in migration 012. `'logit'` removed — schema previously allowed it but config and feature engine only know `'shin'` and `'proportional'`. | `logit` rows pass DB validation but are silently ignored by all downstream code, producing invisible data loss. |
+| H10 | Elo cold-start and variable K-factor are config-driven. `initial_rating=1500`, `k_new_player=40` for first 30 matches, then `k_established=20`. Players with `<10` matches emit `elo_reliability_low=True` flag. | Single `k_base=32` creates large Elo swings for debutants, corrupting opponent-adjusted form for all opponents they face. |
+| H11 | Odds data coverage for `tennis_atp` on The Odds API starts ~2020. Market features are NULL for ~80% of training rows (2000-2019). Market-signal ablation (step 13) is only meaningful on 2020+ subset. | Treating full training range as odds-eligible silently underweights market features relative to true predictive value on covered period. |
+| H12 | `kelly.max_total_exposure_pct: 0.10` caps total same-day bankroll exposure across all bets. Per-match cap still applies. | 10 qualifying bets × 2% per-match cap = 20% total exposure with no circuit breaker. |
+
+Ancillary knobs added in Part 1 alongside the H-row decisions, surfaced here so
+future readers do not have to grep the YAML to find them:
+
+- `feature_engineering.min_window_samples` — per-feature-family minimum sample
+  thresholds (`serve_return=10`, `elo_form=5`, `h2h=1`). Below the threshold
+  the feature is emitted NULL rather than a noisy ratio. Read by feature
+  extractors only; not a critical-null per `FeatureMatrixValidator` R3.
+- `feature_engineering.max_ranking_staleness_days = 7` — `player_rankings`
+  joins older than this are treated as missing (rank pre-feature is NULL).
+  Prevents stale rank from skewing form joins after a long absence.
+- `features.weather.max_obs_age_hours = 3` — concrete realization of H4's
+  "missing observations → NULL features" rule. Any nearest weather
+  observation older than this relative to `start_ts` drops to NULL.
+- `modeling.calibration.min_calibration_samples = 50` — Platt calibrator
+  refuses to fit on fewer rows than this; raises `CalibrationError` rather
+  than silently producing a degenerate calibrator on a thin tail.
+
 ---
 
 ## 13. Build & run quickstart
@@ -438,3 +484,317 @@ $env:DATABASE_URL = "postgresql+psycopg://user:pass@host:5432/db"
 | 2 (post-codex) | `b80ce5b test: PIT trigger integration coverage + tighten node allowlist` | D1 + D2 |
 
 Next session resumes at **Day 3 — Data Agent build** (matches/players ingest, Sackmann adapter, player resolver, intraday_conflict pass, dead_letter integration).
+
+---
+
+## 15. Data Sources & Feature Mapping
+
+**This section is the contract between the Data Agent (writes raw rows) and
+the Research Agent (derives features).** Every feature column the model ever
+sees originates here. If a field/feature is not in this section, it does
+not exist in v1.
+
+PIT recap (referenced throughout): the Postgres trigger `fm_no_lookahead`
+uses `start_ts - any` when known, else `match_date midnight UTC`. The
+application's `point_in_time.py` is stricter: live decisions cut at
+`start_ts - 24h`; historical cut at `match_date - 1 day`. Every feature
+below MUST be computable strictly from rows whose terminal timestamp is
+`< as_of_ts`. "Terminal" = `matches.start_ts` for live rows, `match_date`
+end-of-day UTC for historical rows.
+
+### 15.1 Source 1 — Sackmann GitHub (`JeffSackmann/tennis_atp`)
+
+**Role:** primary historical source for matches, stats, rankings, players.
+Weekly refresh cadence upstream (single-human maintainer — SPOF; see C5).
+Mirrored locally (`config.sources.sackmann.local_mirror_dir`) and optionally
+pinned to a known-good SHA (`pin_commit_sha`). `max_staleness_days=3`
+raises `SackmannStalenessError` and halts the pipeline.
+
+**Files consumed:**
+
+| File | Coverage | Notes |
+|---|---|---|
+| `atp_matches_{year}.csv` | 1968–present | Per-season match facts + per-side stats. Stats columns (`w_ace`, `w_svpt`, `w_1stIn`, …) are sparse before 1991; effectively reliable 1991+. |
+| `atp_rankings_{decade}s.csv` | 1973–present | Weekly ATP rank + points. |
+| `atp_players.csv` | full roster | Birth date, country, hand, height. Authoritative for player identity (`source='sackmann'`, `source_uid=atp_id`). |
+
+**Raw fields collected → DB columns:**
+
+| Sackmann field | Goes into | Notes |
+|---|---|---|
+| `tourney_id`, `tourney_name`, `tourney_level`, `surface`, `draw_size`, `tourney_date` | `tournaments` | `tourney_level` mapped to `tier` (G→GS, M→Masters1000, A→ATP500/250 by draw_size + slug). `tourney_date` → `start_date`. |
+| `winner_id`, `loser_id` (atp_id) | `players.source_uid` (`source='sackmann'`) | Drives `player_id_from_source`. |
+| `winner_name`, `loser_name`, `winner_ioc`, `winner_hand`, `winner_ht` | `players.full_name`, `country_code`, `dominant_hand`, `height_cm` | Names go through `normalize_player_name` before alias write. |
+| `match_num`, `round`, `score`, `best_of`, `minutes`, `tourney_date` | `matches` | `start_ts = NULL` (historical rows have no intraday time). `match_date = tourney_date + round-offset` derivation deferred to ingest. |
+| `w_ace`, `w_df`, `w_svpt`, `w_1stIn`, `w_1stWon`, `w_2ndWon`, `w_SvGms`, `w_bpSaved`, `w_bpFaced` (+ loser mirror) | `match_stats` (one row per player) | Reliable 1991+. NULL before. |
+| `winner_rank`, `winner_rank_points`, `loser_rank`, `loser_rank_points` | Used at feature extraction time (snapshot via `player_rankings` join) | Not persisted on `matches` row — derived. |
+
+**Coverage limitations:**
+
+- **Effective training mass = 2000+** (general features). §3.3.
+- **Stats-dependent features = 1991+.** Pre-1991 rows train Elo/form but not serve/return features.
+- **Retirements / walkovers:** signaled in `score` string ("RET", "W/O"). Parsed into `matches.retired` / `matches.walkover` at ingest. Per C14, retirement counts toward fatigue at weight 0.5; walkover does not count.
+- **No intraday timestamps.** All Sackmann matches have `start_ts IS NULL`.
+- **Round granularity only.** No specific court / time-of-day, so weather has to be matched at venue+date level, not court+hour.
+
+**PIT safety:**
+
+- `start_ts IS NULL` → trigger uses `match_date::timestamp AT TIME ZONE 'UTC'` as cutoff (midnight UTC).
+- `point_in_time.py` historical rule subtracts another full day (`match_date - 1 day`) — strict superset of no-lookahead, discards same-day morning info (accepted; §3.2).
+- `player_rankings` joined by `ranking_date < as_of_ts.date()` only.
+
+### 15.2 Source 2 — ATP website scraper (`atptour.com`)
+
+**Role:** fills the 21-day tail between Sackmann's weekly refresh and "now".
+Only source for `start_ts` (intraday scheduled time) on upcoming matches.
+Rate-limited at 0.5 rps (`config.sources.atp_scraper.rate_limit_rps`).
+
+**Raw fields collected → DB columns:**
+
+| Scraped field | Goes into | Notes |
+|---|---|---|
+| Player name + ATP profile URL | `players` (`source='atp_scraper'`, `source_uid=<profile-slug>`) | Shadow players when Sackmann hasn't published the atp_id yet — they keep this hashed `player_id` forever (A9). |
+| Tournament slug + season | `tournaments` | Reconciled to existing Sackmann tournament row via `(season, slug)`. |
+| `match_date`, `start_ts`, `round` | `matches` | `start_ts` set here for the first time on a row that may exist as historical-empty after Sackmann publishes. |
+| `status` ∈ {scheduled, live, final, cancelled} | `matches.status` | Drives `for_prediction()` filter (C4). |
+| Live score, set count | Audit only in v1 (no in-play modeling; §3.8). | |
+
+**Coverage limitations:**
+
+- **`lookback_days=21` only.** Anything older comes from Sackmann.
+- **No stats.** Scraper does not extract `match_stats`; those land later from Sackmann.
+- **Scheduled-but-unassigned matches** ("Winner of QF1") are filtered out at ingest — `matches.p1_id`/`p2_id` are NOT NULL (§3.5).
+- **Player resolution risk.** New player on scraper before Sackmann publishes → resolved via `player_aliases` (fuzzy ≥ 0.92, DOB required if available); else shadow row is created and reconciled on next Sackmann pull.
+
+**PIT safety:**
+
+- `start_ts` set by scraper → trigger uses `as_of < start_ts`; application uses `as_of = start_ts - 24h`.
+- Cross-source dedup is what `match_id` was designed for: same `(tournament_id, round, sorted(p1,p2), match_date)` from scraper and Sackmann hashes to the same `match_id` regardless of who wrote first (C1).
+- `intraday_conflict` flag (audit-only, never gates training; A10) is set if scraper and Sackmann disagree on a non-key field after both have written.
+
+### 15.3 Source 3 — OpenWeatherMap (`api.openweathermap.org`)
+
+**Role:** per-venue, per-time weather. Hindcast at training time; forecast
+at decision time (T-24h). Rate-limited at 1.0 rps.
+
+**Endpoints:**
+
+| Endpoint | Use | `weather_observations.is_forecast` |
+|---|---|---|
+| `/data/3.0/onecall/day_summary` | Historical hindcast for training (per H5; daily aggregation in 1 call) | FALSE |
+| `/data/3.0/onecall` | Forecast for upcoming matches at decision time | TRUE |
+
+**Raw fields collected → DB columns** (`weather_observations`, PK = `(venue_id, observed_at, source)`):
+
+| OWM field | Column | Notes |
+|---|---|---|
+| `temp` (K → °C) | `temp_c` | |
+| `humidity` | `humidity_pct` | 0–100 (CHECK enforced). |
+| `wind_speed` | `wind_speed_ms` | ≥ 0. |
+| `wind_deg` | `wind_dir_deg` | 0–360. |
+| `pressure` | `pressure_hpa` | |
+| `rain.1h` / `snow.1h` | `precip_mm` | Sum of rain+snow when both present. |
+| `clouds.all` | `cloud_pct` | 0–100. |
+| Forecast horizon at fetch | `forecast_horizon_h` | Hours between fetch time and `observed_at`. NULL for hindcast. Drives noise-injection bucket (low/medium/high; `config.features.weather`). |
+
+**Revision audit:** OWM occasionally rewrites historical rows. Latest write
+wins in `weather_observations`; the previous row is appended to
+`weather_revisions` (A12) for drift forensics.
+
+**Coverage limitations:**
+
+- **Venue resolution is `(city, country_code)`.** Tournament must have a populated `venue_id` (some Sackmann tournaments don't). Missing venue → weather features NULL for those matches; orchestrator gate accepts via `critical_null` rules in `FeatureMatrixValidator`.
+- **Hindcast accuracy drops** before ~2000; treated as best-effort for older training rows.
+- **Court-level granularity:** none. We have venue + hour; not "Court 12 vs Centre Court at the same venue". Indoor/outdoor is read from `tournaments.indoor`, not OWM.
+- **Forecast uncertainty.** Bucketed into low/medium/high by `forecast_horizon_h`; train-time noise injection (A4, `config.features.weather.noise_sigma_by_bucket`) absorbs the train/serve distribution shift.
+
+**PIT safety:**
+
+- For a match at `start_ts`: only `observed_at ≤ start_ts` rows may be joined.
+- For forecasts: only forecasts whose `created_at < as_of_ts` are eligible (the forecast that existed AT decision time, not the one available now). This is enforced at extractor level; trigger does not see weather.
+
+### 15.4 Source 4 — The Odds API (`api.the-odds-api.com/v4`)
+
+**Role:** bookmaker prices. Pinnacle primary (sharp book; baseline for Shin
+devig). Betfair EX EU/UK as cross-checks. Rate-limited at 1.0 rps.
+
+**Raw fields collected → DB columns** (`odds_snapshots`, UNIQUE = `(match_id, bookmaker, market, captured_at, devig_method)`):
+
+| API field | Column | Notes |
+|---|---|---|
+| `bookmaker.key` | `bookmaker` | "pinnacle", "betfair_ex_eu", "betfair_ex_uk". |
+| `market_key` (default `h2h`) | `market` | Only `h2h` ingested for v1. |
+| `last_update` (snapshot time) | `captured_at` | |
+| `outcomes[player1].price` (decimal) | `p1_decimal` | > 1.0 enforced. |
+| `outcomes[player2].price` (decimal) | `p2_decimal` | > 1.0 enforced. |
+| derived | `vig` | `(1/p1_decimal + 1/p2_decimal) - 1`. |
+| derived | `p1_implied`, `p2_implied` | De-vig'd implied probabilities; method recorded in `devig_method` ∈ {shin, proportional, logit}. Shin = primary (A6). Both methods may coexist for the same snapshot (PK includes `devig_method`). |
+| computed flag | `is_opening` | TRUE for the earliest snapshot per `(match_id, bookmaker, market)`. |
+| computed flag | `is_closing` | TRUE for the latest snapshot with `captured_at ≥ start_ts - closing_window_minutes` (config: 15). |
+
+**Coverage limitations:**
+
+- **Tennis market on Odds API begins ~2009.** Market-derived features train only on 2009+ (§3.3).
+- **Pinnacle availability is uneven** for ATP250s and early-round matches; missing odds are explicitly allowed (`modeling.edge.allow_missing_odds=true`, C9). Predictions are still written; `edge_*` columns NULL.
+- **Closing line is backtest-only** (`use_closing_for_backtest=true`); live decisioning uses the snapshot at T-24h, not the closing line.
+- **Drift series.** We do NOT store every intraday tick — we keep opening + closing + (optionally) one decision-time snapshot. `odds_drift_to_close` is computed at backtest from the snapshots present.
+
+**PIT safety:**
+
+- For training: only snapshots with `captured_at < start_ts` may feed features. Closing snapshots are by definition fine (they exist within `closing_window_minutes` before start, which is strictly before).
+- For live decisioning: only snapshots with `captured_at ≤ as_of_ts` (i.e. `≤ start_ts - 24h`). The "decision-time" snapshot is the latest one satisfying this bound, NOT the closing snapshot.
+- `odds_drift_to_close` is a backtest-only feature; it MUST be NULL in live prediction rows (enforced by extractor).
+
+---
+
+### 15.5 Derived feature catalog
+
+`feature_set` = `"v1"` (`config.features.feature_set`). All features are
+written p1-perspective; sign convention for diffs is `p1 - p2`. Windows in
+days come from `config.features.windows_days = [7, 14, 30, 90, 365]`.
+
+Lookahead-risk column conventions:
+- **none** — purely pre-match facts.
+- **low** — depends on a ranking/Elo snapshot that may have updated same-week; enforced by `<` not `≤` joins.
+- **medium** — depends on weather forecast; mitigated by noise injection (A4).
+- **market** — depends on odds snapshot; enforced by `captured_at ≤ as_of_ts`.
+
+#### Elo (surface-blended) — `features.elo`
+
+| Feature key | Source | Derivation | Lookahead | Coverage |
+|---|---|---|---|---|
+| `p1_elo_pre` | Sackmann | Generic Elo updated match-by-match in chronological order. K-factor per H10: `elo.k_new_player` (40) for first `elo.k_threshold_matches` (30) matches, then `elo.k_established` (20); initial rating `elo.initial_rating` (1500); `elo_reliability_low` flag emitted while career matches `< elo.min_reliable_matches` (10). Value AS-OF the row's PIT cutoff. | none | 1968+ |
+| `p2_elo_pre` | Sackmann | Same for p2. | none | 1968+ |
+| `p1_elo_surface_pre` | Sackmann | Surface-isolated Elo (separate ladder per `tournaments.surface`). | none | 1968+ |
+| `p2_elo_surface_pre` | Sackmann | Same for p2. | none | 1968+ |
+| `p1_elo_blended_pre` | derived | `(1 - surface_blend) * p1_elo_pre + surface_blend * p1_elo_surface_pre` where `surface_blend=0.5`. | none | 1968+ |
+| `p2_elo_blended_pre` | derived | Mirror. | none | 1968+ |
+| `elo_diff_blended` | derived | `p1_elo_blended_pre - p2_elo_blended_pre`. | none | 1968+ |
+
+Elo update is run as a chronological pass over `matches` filtered by
+`for_training()`. Embargo (A5) is by `tournament_id`, not days — within a CV
+fold, all matches in a tournament are either fully in train or fully out.
+
+#### Form — rolling win-rate — `features.form`
+
+For each window `w ∈ {7, 14, 30, 90, 365}` and each side `p ∈ {p1, p2}`:
+
+| Feature key | Source | Derivation | Lookahead | Coverage |
+|---|---|---|---|---|
+| `p{1,2}_win_rate_{w}d` | Sackmann | Matches with `match_date ∈ [as_of - w, as_of)` where the player participated; wins/total. Retired matches count (per C14, weighted 0.5 — but win/loss is full credit since the W/L is settled). Walkovers excluded. | none | 1968+ |
+| `p{1,2}_matches_played_{w}d` | Sackmann | Denominator. | none | 1968+ |
+| `win_rate_diff_{w}d` | derived | `p1_win_rate_{w}d - p2_win_rate_{w}d`. | none | 1968+ |
+
+Sparse-sample handling: if `matches_played_{w}d < 3`, the feature is set to
+NULL (let downstream imputation in the model handle it). Validator R3 lists
+the long-window keys (`*_365d`) as critical — short windows allowed NULL.
+
+#### Head-to-head — `features.h2h`
+
+| Feature key | Source | Derivation | Lookahead | Coverage |
+|---|---|---|---|---|
+| `h2h_matches` | Sackmann | Count of prior matches between p1 and p2 with `match_date < as_of`. | none | 1968+ |
+| `h2h_p1_wins` | Sackmann | Same, winner = p1. | none | 1968+ |
+| `h2h_p1_win_rate` | derived | `h2h_p1_wins / h2h_matches`; NULL if `h2h_matches = 0`. | none | 1968+ |
+| `h2h_surface_matches` | Sackmann | Same as above but filtered to `tournaments.surface = current match surface`. | none | 1968+ |
+| `h2h_surface_p1_win_rate` | derived | Same, surface-specific. NULL if denominator < 1. | none | 1968+ |
+
+#### Surface affinity — `features.surface`
+
+| Feature key | Source | Derivation | Lookahead | Coverage |
+|---|---|---|---|---|
+| `p{1,2}_career_win_rate_surface` | Sackmann | Player's lifetime win-rate on this match's `surface` (matches before `as_of`). | none | 1968+ |
+| `p{1,2}_recent_win_rate_surface_365d` | Sackmann | Win-rate on this surface in the trailing 365 days. NULL if < 3 surface matches in window. | none | 1968+ |
+| `surface_affinity_diff` | derived | `p1_recent_win_rate_surface_365d - p2_recent_win_rate_surface_365d`. | none | 1968+ |
+
+#### Fatigue — `features.fatigue`
+
+| Feature key | Source | Derivation | Lookahead | Coverage |
+|---|---|---|---|---|
+| `p{1,2}_rest_days` | Sackmann + scraper | `(as_of_date - last_match_date)`. Last-match-date includes retirements (C14); walkovers excluded. | none | 1968+ |
+| `p{1,2}_matches_last_7d` | Sackmann + scraper | Count, retirement weight=0.5, walkover weight=0. | none | 1968+ |
+| `p{1,2}_matches_last_14d` | Sackmann + scraper | Same with 14-day window. | none | 1968+ |
+| `p{1,2}_minutes_last_7d` | Sackmann | Σ `matches.minutes` in the 7-day window (full match = 1.0 × minutes; retirement = 0.5 × minutes per C14). | none | 1991+ (Sackmann `minutes` reliability) |
+| `p{1,2}_minutes_last_14d` | Sackmann | Same, 14d. | none | 1991+ |
+| `p{1,2}_travel_km_since_last_match` | Sackmann + `venues.lat/lon` | Great-circle distance between last venue and current venue. NULL if either venue lat/lon missing. | none | 1968+ where venues geocoded |
+
+`retirement_counts_as_match`, `walkover_counts_as_match`, and
+`retirement_fatigue_weight` are all read from `config.feature_engineering`;
+extractors NEVER hardcode these (C14).
+
+#### Serve/return rates — `features.serve_return`
+
+For each player p ∈ {p1, p2}, computed over career and a rolling 365-day
+window (split because pre-90d windows are too noisy for serve stats):
+
+| Feature key | Source | Derivation | Lookahead | Coverage |
+|---|---|---|---|---|
+| `p{1,2}_first_serve_pct_career` | Sackmann `match_stats` | Σ `first_in` / Σ `serve_pts`. | none | 1991+ |
+| `p{1,2}_first_serve_pct_365d` | Sackmann | Same, last 365d. | none | 1991+ |
+| `p{1,2}_first_serve_win_pct_365d` | Sackmann | Σ `first_won` / Σ `first_in`. | none | 1991+ |
+| `p{1,2}_second_serve_win_pct_365d` | Sackmann | Σ `second_won` / Σ (`serve_pts` - `first_in`). | none | 1991+ |
+| `p{1,2}_ace_rate_365d` | Sackmann | Σ `aces` / Σ `serve_pts`. | none | 1991+ |
+| `p{1,2}_df_rate_365d` | Sackmann | Σ `double_faults` / Σ `serve_pts`. | none | 1991+ |
+| `p{1,2}_bp_save_pct_365d` | Sackmann | Σ `bp_saved` / Σ `bp_faced`. NULL if denominator = 0. | none | 1991+ |
+| `serve_dominance_diff_365d` | derived | `(p1_first_serve_win_pct - p2_first_serve_win_pct)` on 365d. | none | 1991+ |
+
+Pre-1991: all `*_serve_*` and `bp_*` features NULL; validator R3 lists them
+as critical-null only on rows where Sackmann coverage exists.
+
+#### Market signals — `features.market`
+
+All market features sourced from `odds_snapshots`; PK joined on the
+de-vig'd Shin row (`devig_method='shin'`) for primary, proportional for
+fallback.
+
+| Feature key | Source | Derivation | Lookahead | Coverage |
+|---|---|---|---|---|
+| `p1_implied_pinnacle_opening` | Odds API | `p1_implied` from snapshot with `is_opening=TRUE`, `bookmaker='pinnacle'`, `devig_method='shin'`. | market | 2009+ |
+| `p1_implied_pinnacle_closing` | Odds API | Same with `is_closing=TRUE`. **Backtest-only**; NULL in live prediction rows. | market | 2009+ |
+| `p1_implied_pinnacle_decision` | Odds API | Latest `pinnacle` Shin snapshot with `captured_at ≤ as_of_ts`. This is the live decisioning feature. | market | 2009+ |
+| `p1_implied_proportional_decision` | Odds API | Same but `devig_method='proportional'` (fallback / cross-check). | market | 2009+ |
+| `line_movement_p1` | derived | `p1_implied_pinnacle_closing - p1_implied_pinnacle_opening`. **Backtest-only**, NULL live. | market | 2009+ |
+| `consensus_implied_p1` | Odds API | Cross-bookmaker mean of `p1_implied` at decision time (pinnacle + betfair_ex_*). | market | 2009+ |
+| `vig_pinnacle_decision` | Odds API | `vig` from the same decision-time snapshot. | market | 2009+ |
+| `odds_drift_to_close` | derived | Per-tournament average of `|line_movement|`. **Backtest-only**, NULL live. | market | 2009+ |
+
+Whenever `allow_missing_odds=true` and no Pinnacle snapshot exists, all
+`p1_implied_*` and downstream edges are NULL; the prediction row is still
+written (C9). The validator R3 does NOT mark these as critical-null.
+
+#### Conditions (weather + venue) — `features.conditions`
+
+| Feature key | Source | Derivation | Lookahead | Coverage |
+|---|---|---|---|---|
+| `temp_c_decision` | OWM | Nearest `weather_observations.temp_c` to `start_ts` with `observed_at ≤ start_ts`, hindcast at training, forecast at decision. | medium (forecast bucket) | OWM era |
+| `humidity_pct_decision` | OWM | Same for humidity. | medium | OWM era |
+| `wind_speed_ms_decision` | OWM | Same for wind. | medium | OWM era |
+| `wind_dir_deg_decision` | OWM | Same for wind direction. | medium | OWM era |
+| `precip_mm_decision` | OWM | Same for precipitation (already 1h-sum). | medium | OWM era |
+| `cloud_pct_decision` | OWM | Same for cloud cover. | medium | OWM era |
+| `altitude_m` | `venues` | Static venue attribute. Affects ball-flight physics. | none | Where venue geocoded |
+| `indoor` | `tournaments.indoor` | Boolean; weather features are still emitted indoors (HVAC ≠ outdoor) but `indoor=true` lets the model down-weight them. | none | full |
+| `forecast_uncertainty_bucket` | derived | "low"/"medium"/"high" from `forecast_horizon_h` of the snapshot used. NULL for hindcast (training). Drives noise-injection sigma at training time. | none | OWM era |
+
+Indoor + missing-venue handling: if `indoor=true` the validator does not
+flag missing-weather as critical. If `venue_id IS NULL`, all conditions
+features NULL — validator R3 records the gap; model imputes.
+
+---
+
+### 15.6 Cross-source field reconciliation (Data Agent contract)
+
+| Concern | Rule | Where enforced |
+|---|---|---|
+| Player identity across Sackmann/scraper | `normalize_player_name` → `player_aliases` lookup → DOB+country tiebreaker → fuzzy ≥ 0.92 → manual override | `agents/data/resolver.py` (Day 3); §11 |
+| Match identity across sources | `match_id` deterministic hash of `(tournament_id, round, sorted(p1,p2), match_date)` — `start_ts` excluded so historical+live converge (C1) | `core/ids.match_id`; §10 |
+| Tournament identity | `tournament_id` from `(season, slug)`; slugs are reconciled at ingest by maintained alias map (not yet built) | `core/ids.tournament_id` |
+| Venue identity | `(city, country_code)`; "Monte Carlo" vs "Monte-Carlo" fragility accepted for v1 (§3.4) | `core/ids.venue_id` |
+| Disagreement between sources after both written | `matches.intraday_conflict = TRUE`; audit-only, never gates training (A10) | DataAgent post-ingest pass |
+| Missing market data | `allow_missing_odds=true`; prediction written with NULL edges (C9) | `modeling.edge` config + `predictions` schema |
+| Stale Sackmann | `SackmannStalenessError` raised if last pull older than `max_staleness_days=3`; halt pipeline (C5) | DataAgent staleness check |
+
+This section is the durable handshake. Research Agent reads ONLY columns
+listed here; Data Agent writes ONLY rows that conform. Any new feature
+proposal must add a row in 15.5; any new raw field must add a row in
+15.1–15.4.

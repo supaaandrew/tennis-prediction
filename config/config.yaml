@@ -73,10 +73,23 @@ sources:
     local_mirror_dir: ".cache/sackmann/mirror"   # full repo snapshot per pull
     pin_commit_sha: null                          # set to a SHA to lock a known-good revision
     max_staleness_days: 3                         # halts pipeline loudly if last pull older
+    ranking_decades: ["90s", "00s", "10s", "20s"]
+    # H3: match_date authority per status. Different dates -> different match_id
+    # hashes -> two rows for the same logical match. Centralized here so neither
+    # the Sackmann adapter nor the ATP scraper invents its own rule.
+    canonical_date_source:
+      final:     "sackmann"
+      scheduled: "atp_scraper"
+      live:      "atp_scraper"
 
   atp_scraper:
     base_url: "https://www.atptour.com"
     user_agent: "tennis-bot/1.0 (+contact)"
+    user_agents:
+      - "Mozilla/5.0 (compatible; tennis-research-bot/1.0)"
+      - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+      - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    rotate_user_agent: true
     request_timeout_s: 30
     rate_limit_rps: 0.5
     lookback_days: 21
@@ -84,9 +97,14 @@ sources:
   openweather:
     base_url: "https://api.openweathermap.org"
     api_key_env: OPENWEATHER_API_KEY    # required in prod
-    historical_endpoint: "/data/3.0/onecall/timemachine"
+    # One Call 3.0 requires paid subscription (credit card).
+    # Free tier: 1,000 calls/day. Price: $0.0015/call beyond that.
+    # Set daily cap to 1,000 in OWM account billing settings.
+    historical_endpoint: "/data/3.0/onecall/day_summary"   # H5: daily aggregation in 1 call vs 24x for timemachine
     forecast_endpoint:   "/data/3.0/onecall"
-    rate_limit_rps: 1.0
+    rate_limit_rps: 0.8
+    max_forecast_horizon_h: 168
+    on_missing_forecast: "emit_null"   # H4: no climatological fallback in v1
 
   odds_api:
     base_url: "https://api.the-odds-api.com/v4"
@@ -95,12 +113,15 @@ sources:
     bookmakers: ["pinnacle", "betfair_ex_eu", "betfair_ex_uk"]
     rate_limit_rps: 1.0
     closing_window_minutes: 15          # snapshot ≤ N min before start_ts == "closing"
+    coverage_start_year: 2020           # H11: odds data begins ~2020
 
 # ---------------------------------------------------------------------------
 # Ingestion behavior (Data Agent)
 # ---------------------------------------------------------------------------
 ingestion:
-  history_backfill_seasons: [2000, 2026]
+  history_backfill_season_range:        # H2: replaces ambiguous list form
+    start: 2000
+    end:   2026
   daily_lookforward_days: 7
   retry:
     max_attempts: 5
@@ -118,9 +139,17 @@ features:
   feature_set: "v1"
   windows_days: [7, 14, 30, 90, 365]
   elo:
-    k_base: 32
+    # H10: variable K-factor + cold-start. Single k_base over-weights debutants
+    # and corrupts opponent-adjusted form for every opponent they face.
+    initial_rating: 1500
+    k_new_player: 40                    # H10: first k_threshold_matches
+    k_threshold_matches: 30             # H10: switch point
+    k_established: 20                   # H10: after threshold
+    min_reliable_matches: 10            # H10: emit elo_reliability_low below this
+    k_base: 32                          # legacy; superseded by k_new_player/k_established
     surface_blend: 0.5
     glicko: false
+    materialize_snapshots: true         # H7: writes elo_snapshots row per processed match
   market:
     # Shin is primary, proportional is fallback. Both reported in metrics.
     devig_method_primary:  "shin"
@@ -128,13 +157,20 @@ features:
     use_closing_for_backtest: true
     track_odds_drift_to_close: true     # backtest-only; null in live context
   weather:
-    # Train-time noise injection bucketed by forecast uncertainty.
+    # H1: noise injection lives in the Modeling Agent training loop only —
+    # feature_matrix always stores clean values. This flag is read by Modeling,
+    # never by Research.
     inject_forecast_noise: true
     uncertainty_buckets: ["low", "medium", "high"]
+    uncertainty_bucket_thresholds:      # H4: explicit forecast_horizon_h bands
+      low:    [0, 6]
+      medium: [6, 24]
+      high:   [24, 168]
     noise_sigma_by_bucket:
-      low:    { temp_c: 0.5, humidity_pct: 2.0, wind_speed_ms: 0.5 }
-      medium: { temp_c: 1.5, humidity_pct: 5.0, wind_speed_ms: 1.5 }
-      high:   { temp_c: 3.0, humidity_pct: 10.0, wind_speed_ms: 3.0 }
+      low:    { temp_c: 0.5,  humidity_pct: 2.0,  wind_speed_ms: 0.5  }
+      medium: { temp_c: 1.5,  humidity_pct: 5.0,  wind_speed_ms: 1.5  }
+      high:   { temp_c: 3.0,  humidity_pct: 10.0, wind_speed_ms: 3.0  }
+    max_obs_age_hours: 3                # H4: observations older than this -> NULL features
   drift:
     psi_threshold: 0.2
     ks_alpha: 0.01
@@ -157,6 +193,8 @@ modeling:
       colsample_bytree: 0.8
       reg_lambda: 1.0
       tree_method: "hist"
+      early_stopping_rounds: 50
+      n_jobs: -1
     lgbm:
       n_estimators: 800
       num_leaves: 63
@@ -164,6 +202,8 @@ modeling:
       feature_fraction: 0.8
       bagging_fraction: 0.8
       lambda_l2: 1.0
+      early_stopping_rounds: 50
+      n_jobs: -1
   meta_learner:
     type: "logistic"
     C: 1.0
@@ -173,6 +213,7 @@ modeling:
     # and is NOT used to fit base learners or the stacker.
     method: "platt"
     tail_days: 60
+    min_calibration_samples: 50         # refuse to fit calibrator on fewer rows
   metrics:
     primary: "logloss"
     secondary: ["brier", "ece", "roi_kelly", "roi_kelly_shin", "roi_kelly_proportional"]
@@ -183,6 +224,7 @@ modeling:
   kelly:
     fraction: 0.25
     max_exposure_pct: 0.02
+    max_total_exposure_pct: 0.10        # H12: same-day all-bets bankroll cap
 
 # ---------------------------------------------------------------------------
 # Decision-time timing
@@ -300,3 +342,17 @@ feature_engineering:
   retirement_counts_as_match: true      # walked on court, counts toward fatigue
   walkover_counts_as_match: false       # no play, no fatigue
   retirement_fatigue_weight: 0.5        # partial-match credit for retirements
+
+  best_of_null_fallback_by_tier:        # H8: pre-2000 Sackmann often omits best_of
+    GS:          5
+    Masters1000: 3
+    ATP500:      3
+    ATP250:      3
+    default:     3
+
+  min_window_samples:                   # below these counts -> feature emitted NULL
+    serve_return: 10
+    elo_form:      5
+    h2h:           1
+
+  max_ranking_staleness_days: 7         # rankings older than this drop player_rank_pre

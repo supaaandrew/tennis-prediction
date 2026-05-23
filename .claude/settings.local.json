@@ -18,7 +18,20 @@
       "Bash(git -C \"C:/Users/Andrew/Documents/Tennis_Prediction_Bot\" log --oneline -3)",
       "Bash(git -C \"C:/Users/Andrew/Documents/Tennis_Prediction_Bot\" diff .claude/settings.local.json)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 60)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -c \"from tennis.core.config import load_config; cfg = load_config\\('config/config.yaml'\\); print\\('OK: config loads'\\); print\\('season start:', cfg.ingestion.history_backfill_season_range.start\\); print\\('elo initial:', cfg.features.elo.initial_rating\\); print\\('bucket thresholds:', cfg.features.weather.uncertainty_bucket_thresholds\\); print\\('kelly total cap:', cfg.modeling.kelly.max_total_exposure_pct\\); print\\('OWM endpoint:', cfg.sources.openweather.historical_endpoint\\)\")",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 30)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/integration -q 2>&1 | Select-Object -Last 20)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\pip.exe install \"pytest-asyncio>=0.23\" 2>&1 | Select-Object -Last 8)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 40)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\pip.exe install \"sqlalchemy>=2.0\" 2>&1 | Select-Object -Last 6)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 80)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 20)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 25)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 10)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/integration -q 2>&1 | Select-Object -Last 30)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1)"
     ]
   }
 }

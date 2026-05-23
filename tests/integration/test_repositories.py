@@ -1,0 +1,604 @@
+"""Integration tests for concrete repositories.
+
+These tests run the FULL upsert + query lifecycle against a real
+Postgres instance (testcontainers). They auto-skip when Docker isn't
+available — same pattern as `tests/integration/test_pit_trigger.py`.
+
+What's covered here that the unit tests can't:
+  - `for_training()` returns only `status='final'` rows (SQL filter).
+  - `for_prediction()` returns only `scheduled`/`live` rows (SQL filter).
+  - `WeatherObservationRepositoryImpl.upsert()` writes a
+    `weather_revisions` row on overwrite (audit trail).
+  - Upsert idempotency: same natural key + two calls = one row.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
+
+import pytest
+
+from tennis.core.ids import (
+    match_id as compute_match_id,
+    player_id_from_source,
+    tournament_id as compute_tournament_id,
+    venue_id as compute_venue_id,
+)
+
+
+# ---------------------------------------------------------------------------
+# Session factory bound to the testcontainers engine (from conftest)
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def session_factory(postgres_engine: Any):
+    """Yields a callable matching the SessionCallable contract.
+
+    We don't use PostgresSessionFactory here because that creates its own
+    engine; the testcontainers fixture already provides one we want to
+    reuse so all tests share the same migrated database.
+    """
+    from sqlalchemy import text
+    from sqlalchemy.orm import sessionmaker
+
+    Session = sessionmaker(postgres_engine, expire_on_commit=False)
+
+    @contextmanager
+    def _factory():
+        s = Session()
+        # Mirror PostgresSessionFactory's UTC enforcement on each session.
+        s.execute(text("SET TIME ZONE 'UTC'"))
+        try:
+            yield s
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+
+    return _factory
+
+
+# ---------------------------------------------------------------------------
+# Seed helpers — minimal entity hierarchy so FKs are satisfied
+# ---------------------------------------------------------------------------
+def _seed_player(repo, *, source_uid: str, name: str = "Test Player"):
+    from tennis.storage.postgres.rows import PlayerRow
+
+    row = PlayerRow(
+        player_id=player_id_from_source(source="test", source_uid=source_uid),
+        full_name=name,
+        source="test",
+        source_uid=source_uid,
+    )
+    return repo.upsert(row)
+
+
+def _seed_venue(repo, *, city: str = "Test City", country: str = "TST"):
+    from tennis.storage.postgres.rows import VenueRow
+
+    row = VenueRow(
+        venue_id=compute_venue_id(city=city, country_code=country),
+        city=city,
+        country_code=country,
+    )
+    return repo.upsert(row)
+
+
+def _seed_tournament(repo, *, slug: str, tier: str = "GS",
+                     season: int = 2026, surface: str = "Hard",
+                     venue_id: int | None = None):
+    from tennis.storage.postgres.rows import TournamentRow
+
+    row = TournamentRow(
+        tournament_id=compute_tournament_id(season=season, slug=slug),
+        season=season,
+        slug=slug,
+        name=slug.replace("-", " ").title(),
+        tier=tier,
+        surface=surface,
+        indoor=False,
+        venue_id=venue_id,
+    )
+    return repo.upsert(row)
+
+
+def _seed_match(repo, *, tournament_id: int, p1_id: int, p2_id: int,
+                round: str, match_date: date, status: str = "final",
+                source_uid: str | None = None,
+                start_ts: datetime | None = None):
+    from tennis.storage.postgres.rows import MatchRow
+
+    row = MatchRow(
+        match_id=compute_match_id(
+            tournament_id=tournament_id, round=round,
+            player_a=p1_id, player_b=p2_id, match_date=match_date,
+        ),
+        tournament_id=tournament_id,
+        round=round,
+        match_date=match_date,
+        p1_id=p1_id,
+        p2_id=p2_id,
+        status=status,
+        source="test",
+        source_uid=source_uid or f"m-{tournament_id}-{round}-{p1_id}-{p2_id}",
+        start_ts=start_ts,
+        match_date_source="sackmann",
+    )
+    return repo.upsert(row)
+
+
+# ---------------------------------------------------------------------------
+# 1. for_training() — only status='final', only allowed tiers
+# ---------------------------------------------------------------------------
+class TestForTraining:
+    def test_returns_only_final_status(self, session_factory: Any) -> None:
+        from tennis.storage.postgres.impl import (
+            MatchRepositoryImpl,
+            PlayerRepositoryImpl,
+            TournamentRepositoryImpl,
+            VenueRepositoryImpl,
+        )
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches = MatchRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="ForTrainCity1", country="T01")
+        t = _seed_tournament(tournaments, slug="train-1", venue_id=v.venue_id)
+        p1 = _seed_player(players, source_uid="ftA")
+        p2 = _seed_player(players, source_uid="ftB")
+
+        _seed_match(matches, tournament_id=t.tournament_id,
+                    p1_id=p1.player_id, p2_id=p2.player_id,
+                    round="QF", match_date=date(2026, 1, 25),
+                    status="final", source_uid="ft-final")
+        _seed_match(matches, tournament_id=t.tournament_id,
+                    p1_id=p1.player_id, p2_id=p2.player_id,
+                    round="SF", match_date=date(2026, 1, 26),
+                    status="scheduled", source_uid="ft-sched")
+        _seed_match(matches, tournament_id=t.tournament_id,
+                    p1_id=p1.player_id, p2_id=p2.player_id,
+                    round="F", match_date=date(2026, 1, 27),
+                    status="cancelled", source_uid="ft-cancelled")
+
+        rows = list(matches.for_training(season_start=2026, season_end=2026))
+        statuses = {r.status for r in rows}
+        # Only finals — never scheduled, live, or cancelled.
+        assert statuses == {"final"}, f"got statuses: {statuses}"
+
+    def test_excludes_disallowed_tiers(self, session_factory: Any) -> None:
+        from tennis.storage.postgres.impl import (
+            MatchRepositoryImpl,
+            PlayerRepositoryImpl,
+            TournamentRepositoryImpl,
+            VenueRepositoryImpl,
+        )
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches = MatchRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="ForTrainCity2", country="T02")
+        # Two tournaments — one allowed tier, one excluded.
+        t_gs = _seed_tournament(tournaments, slug="train-2-gs",
+                                tier="GS", venue_id=v.venue_id)
+        t_chl = _seed_tournament(tournaments, slug="train-2-chl",
+                                 tier="Challenger", venue_id=v.venue_id)
+        p1 = _seed_player(players, source_uid="ft2A")
+        p2 = _seed_player(players, source_uid="ft2B")
+
+        _seed_match(matches, tournament_id=t_gs.tournament_id,
+                    p1_id=p1.player_id, p2_id=p2.player_id,
+                    round="QF", match_date=date(2026, 2, 1),
+                    status="final", source_uid="ft2-gs")
+        _seed_match(matches, tournament_id=t_chl.tournament_id,
+                    p1_id=p1.player_id, p2_id=p2.player_id,
+                    round="F", match_date=date(2026, 2, 2),
+                    status="final", source_uid="ft2-chl")
+
+        rows = list(matches.for_training(season_start=2026, season_end=2026))
+        seen_tournaments = {r.tournament_id for r in rows}
+        assert t_gs.tournament_id in seen_tournaments
+        assert t_chl.tournament_id not in seen_tournaments
+
+
+# ---------------------------------------------------------------------------
+# 2. for_prediction() — only scheduled/live, no finals
+# ---------------------------------------------------------------------------
+class TestForPrediction:
+    def test_returns_only_scheduled_and_live(self, session_factory: Any) -> None:
+        from tennis.storage.postgres.impl import (
+            MatchRepositoryImpl,
+            PlayerRepositoryImpl,
+            TournamentRepositoryImpl,
+            VenueRepositoryImpl,
+        )
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches = MatchRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="ForPredCity1", country="P01")
+        t = _seed_tournament(tournaments, slug="pred-1", venue_id=v.venue_id)
+        p1 = _seed_player(players, source_uid="fpA")
+        p2 = _seed_player(players, source_uid="fpB")
+
+        anchor_ts = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
+
+        _seed_match(matches, tournament_id=t.tournament_id,
+                    p1_id=p1.player_id, p2_id=p2.player_id,
+                    round="QF", match_date=date(2026, 6, 2),
+                    start_ts=anchor_ts + timedelta(hours=20),
+                    status="scheduled", source_uid="fp-sched")
+        _seed_match(matches, tournament_id=t.tournament_id,
+                    p1_id=p1.player_id, p2_id=p2.player_id,
+                    round="SF", match_date=date(2026, 6, 2),
+                    start_ts=anchor_ts + timedelta(hours=22),
+                    status="live", source_uid="fp-live")
+        _seed_match(matches, tournament_id=t.tournament_id,
+                    p1_id=p1.player_id, p2_id=p2.player_id,
+                    round="F", match_date=date(2026, 6, 2),
+                    start_ts=anchor_ts + timedelta(hours=23),
+                    status="final", source_uid="fp-final")
+
+        rows = list(matches.for_prediction(as_of=anchor_ts, lookforward_days=3))
+        statuses = {r.status for r in rows}
+        assert statuses.issubset({"scheduled", "live"})
+        assert "final" not in statuses
+
+
+# ---------------------------------------------------------------------------
+# 3. WeatherObservationRepositoryImpl writes weather_revisions on overwrite
+# ---------------------------------------------------------------------------
+class TestWeatherAuditTrail:
+    def test_overwrite_writes_to_weather_revisions(self, session_factory: Any) -> None:
+        from sqlalchemy import select
+
+        from tennis.storage.postgres import models as m
+        from tennis.storage.postgres.impl import (
+            VenueRepositoryImpl,
+            WeatherObservationRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import WeatherObservationRow
+
+        venues = VenueRepositoryImpl(session_factory)
+        weather = WeatherObservationRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="WeatherCity", country="WX1")
+        obs_ts = datetime(2026, 6, 10, 14, 0, tzinfo=UTC)
+
+        first = WeatherObservationRow(
+            venue_id=v.venue_id, observed_at=obs_ts, source="owm",
+            is_forecast=False, temp_c=22.5, humidity_pct=55.0,
+        )
+        weather.upsert(first)
+
+        # No revisions row yet.
+        with session_factory() as s:
+            count = s.execute(
+                select(m.WeatherRevision).where(
+                    m.WeatherRevision.venue_id == v.venue_id,
+                    m.WeatherRevision.observed_at == obs_ts,
+                )
+            ).all()
+            assert len(count) == 0
+
+        # Overwrite with a new value -> must produce a revision row.
+        second = WeatherObservationRow(
+            venue_id=v.venue_id, observed_at=obs_ts, source="owm",
+            is_forecast=False, temp_c=24.0, humidity_pct=60.0,
+        )
+        weather.upsert(second)
+
+        with session_factory() as s:
+            revs = s.execute(
+                select(m.WeatherRevision).where(
+                    m.WeatherRevision.venue_id == v.venue_id,
+                    m.WeatherRevision.observed_at == obs_ts,
+                )
+            ).scalars().all()
+            assert len(revs) == 1
+            rev = revs[0]
+            # previous_row carries the FIRST temp_c (22.5).
+            assert rev.previous_row.get("temp_c") == 22.5
+            assert rev.new_row.get("temp_c") == 24.0
+
+    def test_revision_captures_first_value_as_previous_row(
+        self, session_factory: Any
+    ) -> None:
+        """Audit-fix Test A — revision is written in the same statement
+        as the overwrite. Calling upsert twice with different values
+        produces exactly one revision row whose `previous_row` matches
+        the FIRST upsert's values.
+        """
+        from sqlalchemy import select
+
+        from tennis.storage.postgres import models as m
+        from tennis.storage.postgres.impl import (
+            VenueRepositoryImpl,
+            WeatherObservationRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import WeatherObservationRow
+
+        venues = VenueRepositoryImpl(session_factory)
+        weather = WeatherObservationRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="AuditOrderCity", country="AO1")
+        obs_ts = datetime(2026, 9, 1, 14, 0, tzinfo=UTC)
+
+        weather.upsert(WeatherObservationRow(
+            venue_id=v.venue_id, observed_at=obs_ts, source="owm",
+            is_forecast=False, temp_c=15.0, humidity_pct=50.0,
+        ))
+        weather.upsert(WeatherObservationRow(
+            venue_id=v.venue_id, observed_at=obs_ts, source="owm",
+            is_forecast=False, temp_c=21.0, humidity_pct=70.0,
+        ))
+
+        with session_factory() as s:
+            revs = s.execute(
+                select(m.WeatherRevision).where(
+                    m.WeatherRevision.venue_id == v.venue_id,
+                    m.WeatherRevision.observed_at == obs_ts,
+                )
+            ).scalars().all()
+            assert len(revs) == 1
+            # previous_row pins the FIRST upsert (15.0), not the second.
+            assert revs[0].previous_row.get("temp_c") == 15.0
+            assert revs[0].previous_row.get("humidity_pct") == 50.0
+            # new_row pins the second upsert.
+            assert revs[0].new_row.get("temp_c") == 21.0
+
+    def test_overwrite_aborts_when_revision_insert_fails(
+        self, session_factory: Any
+    ) -> None:
+        """Audit-fix Test B — the revision insert and the row update
+        are in a SINGLE statement, so if the revision insert fails the
+        overwrite aborts and the stored observation retains its
+        original value. Simulated by installing a temporary BEFORE
+        INSERT trigger on `weather_revisions` that raises.
+        """
+        from sqlalchemy import select, text
+
+        from tennis.storage.postgres import models as m
+        from tennis.storage.postgres.impl import (
+            VenueRepositoryImpl,
+            WeatherObservationRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import WeatherObservationRow
+
+        venues = VenueRepositoryImpl(session_factory)
+        weather = WeatherObservationRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="AuditAtomicCity", country="AT1")
+        obs_ts = datetime(2026, 10, 1, 14, 0, tzinfo=UTC)
+
+        # Plant an original observation.
+        weather.upsert(WeatherObservationRow(
+            venue_id=v.venue_id, observed_at=obs_ts, source="owm",
+            is_forecast=False, temp_c=10.0, humidity_pct=40.0,
+        ))
+
+        # Install a trigger that aborts every INSERT into weather_revisions.
+        with session_factory() as s:
+            s.execute(text(
+                """
+                CREATE OR REPLACE FUNCTION _atomic_block_revision()
+                  RETURNS trigger AS $$
+                BEGIN
+                    RAISE EXCEPTION 'simulated revision-insert failure';
+                END;
+                $$ LANGUAGE plpgsql;
+                """
+            ))
+            s.execute(text(
+                "CREATE TRIGGER _atomic_block_revision_trg "
+                "BEFORE INSERT ON weather_revisions "
+                "FOR EACH ROW EXECUTE FUNCTION _atomic_block_revision();"
+            ))
+
+        try:
+            # Attempt overwrite — must raise because the revision INSERT
+            # in the CTE fails, aborting the whole statement.
+            with pytest.raises(Exception, match="simulated revision-insert failure"):
+                weather.upsert(WeatherObservationRow(
+                    venue_id=v.venue_id, observed_at=obs_ts, source="owm",
+                    is_forecast=False, temp_c=99.0, humidity_pct=99.0,
+                ))
+
+            # The observation row must still carry the ORIGINAL value
+            # — the overwrite did not commit.
+            with session_factory() as s:
+                o = s.execute(
+                    select(m.WeatherObservation).where(
+                        m.WeatherObservation.venue_id == v.venue_id,
+                        m.WeatherObservation.observed_at == obs_ts,
+                    )
+                ).scalar_one()
+                assert o.temp_c == 10.0
+                assert o.humidity_pct == 40.0
+
+            # And no revision row was written (the trigger blocked it).
+            with session_factory() as s:
+                rev_count = s.execute(
+                    select(m.WeatherRevision).where(
+                        m.WeatherRevision.venue_id == v.venue_id,
+                        m.WeatherRevision.observed_at == obs_ts,
+                    )
+                ).all()
+                assert len(rev_count) == 0
+        finally:
+            # Clean up the trigger so other tests aren't affected.
+            with session_factory() as s:
+                s.execute(text(
+                    "DROP TRIGGER IF EXISTS _atomic_block_revision_trg "
+                    "ON weather_revisions;"
+                ))
+                s.execute(text(
+                    "DROP FUNCTION IF EXISTS _atomic_block_revision();"
+                ))
+
+    def test_first_insert_creates_no_revision(self, session_factory: Any) -> None:
+        from sqlalchemy import select
+
+        from tennis.storage.postgres import models as m
+        from tennis.storage.postgres.impl import (
+            VenueRepositoryImpl,
+            WeatherObservationRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import WeatherObservationRow
+
+        venues = VenueRepositoryImpl(session_factory)
+        weather = WeatherObservationRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="FirstInsCity", country="WX2")
+        obs_ts = datetime(2026, 7, 4, 14, 0, tzinfo=UTC)
+        weather.upsert(
+            WeatherObservationRow(
+                venue_id=v.venue_id, observed_at=obs_ts, source="owm",
+                is_forecast=True, temp_c=18.0,
+            )
+        )
+        with session_factory() as s:
+            revs = s.execute(
+                select(m.WeatherRevision).where(
+                    m.WeatherRevision.venue_id == v.venue_id,
+                    m.WeatherRevision.observed_at == obs_ts,
+                )
+            ).all()
+            assert len(revs) == 0
+
+
+# ---------------------------------------------------------------------------
+# 4. Upsert idempotency — natural key dedup, two calls = one row
+# ---------------------------------------------------------------------------
+class TestUpsertIdempotency:
+    def test_player_upsert_idempotent(self, session_factory: Any) -> None:
+        from sqlalchemy import select
+
+        from tennis.storage.postgres import models as m
+        from tennis.storage.postgres.impl import PlayerRepositoryImpl
+        from tennis.storage.postgres.rows import PlayerRow
+
+        players = PlayerRepositoryImpl(session_factory)
+        pid = player_id_from_source(source="test", source_uid="idem-player")
+
+        for full_name in ("Alpha One", "Alpha Two", "Alpha Three"):
+            players.upsert(
+                PlayerRow(
+                    player_id=pid, full_name=full_name,
+                    source="test", source_uid="idem-player",
+                )
+            )
+
+        with session_factory() as s:
+            rows = s.execute(
+                select(m.Player).where(
+                    m.Player.source == "test",
+                    m.Player.source_uid == "idem-player",
+                )
+            ).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].full_name == "Alpha Three"
+
+    def test_match_upsert_idempotent(self, session_factory: Any) -> None:
+        from sqlalchemy import select
+
+        from tennis.storage.postgres import models as m
+        from tennis.storage.postgres.impl import (
+            MatchRepositoryImpl,
+            PlayerRepositoryImpl,
+            TournamentRepositoryImpl,
+            VenueRepositoryImpl,
+        )
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches = MatchRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="IdemCity", country="ID1")
+        t = _seed_tournament(tournaments, slug="idem-tourney", venue_id=v.venue_id)
+        p1 = _seed_player(players, source_uid="idemMatchA")
+        p2 = _seed_player(players, source_uid="idemMatchB")
+
+        # Three upserts with the same source_uid (natural key).
+        for status in ("scheduled", "live", "final"):
+            _seed_match(matches, tournament_id=t.tournament_id,
+                        p1_id=p1.player_id, p2_id=p2.player_id,
+                        round="F", match_date=date(2026, 8, 1),
+                        status=status, source_uid="idem-match-uid")
+
+        with session_factory() as s:
+            rows = s.execute(
+                select(m.Match).where(
+                    m.Match.source == "test",
+                    m.Match.source_uid == "idem-match-uid",
+                )
+            ).scalars().all()
+            assert len(rows) == 1
+            # Final write wins.
+            assert rows[0].status == "final"
+
+    def test_odds_snapshot_natural_key_dedup(self, session_factory: Any) -> None:
+        from sqlalchemy import select
+
+        from tennis.storage.postgres import models as m
+        from tennis.storage.postgres.impl import (
+            MatchRepositoryImpl, OddsSnapshotRepositoryImpl,
+            PlayerRepositoryImpl, TournamentRepositoryImpl,
+            VenueRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import OddsSnapshotRow
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches_repo = MatchRepositoryImpl(session_factory)
+        odds = OddsSnapshotRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="OddsCity", country="OD1")
+        t = _seed_tournament(tournaments, slug="odds-t", venue_id=v.venue_id)
+        p1 = _seed_player(players, source_uid="oA")
+        p2 = _seed_player(players, source_uid="oB")
+        match = _seed_match(
+            matches_repo, tournament_id=t.tournament_id,
+            p1_id=p1.player_id, p2_id=p2.player_id,
+            round="QF", match_date=date(2026, 8, 5),
+            status="scheduled", source_uid="odds-match",
+        )
+
+        captured = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+        # Two inserts with the same natural key (different prices).
+        odds.insert(OddsSnapshotRow(
+            match_id=match.match_id, bookmaker="pinnacle",
+            captured_at=captured,
+            p1_decimal=1.90, p2_decimal=1.95,
+            p1_implied=0.50, p2_implied=0.50, vig=0.05,
+            devig_method="shin",
+        ))
+        odds.insert(OddsSnapshotRow(
+            match_id=match.match_id, bookmaker="pinnacle",
+            captured_at=captured,
+            p1_decimal=1.85, p2_decimal=2.00,
+            p1_implied=0.52, p2_implied=0.48, vig=0.05,
+            devig_method="shin",
+        ))
+
+        with session_factory() as s:
+            rows = s.execute(
+                select(m.OddsSnapshot).where(
+                    m.OddsSnapshot.match_id == match.match_id,
+                    m.OddsSnapshot.bookmaker == "pinnacle",
+                    m.OddsSnapshot.captured_at == captured,
+                    m.OddsSnapshot.devig_method == "shin",
+                )
+            ).scalars().all()
+            assert len(rows) == 1
+            assert float(rows[0].p1_decimal) == 1.85

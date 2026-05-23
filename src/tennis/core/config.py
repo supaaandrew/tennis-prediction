@@ -138,11 +138,22 @@ class SackmannSource(_Section):
     local_mirror_dir: str = ".cache/sackmann/mirror"
     pin_commit_sha: str | None = None
     max_staleness_days: int = 3
+    ranking_decades: tuple[str, ...] = ("90s", "00s", "10s", "20s")
+    # H3: per-status authority for match_date when sources disagree.
+    canonical_date_source: dict[str, str] = Field(
+        default_factory=lambda: {
+            "final": "sackmann",
+            "scheduled": "atp_scraper",
+            "live": "atp_scraper",
+        }
+    )
 
 
 class AtpScraperSource(_Section):
     base_url: str
     user_agent: str
+    user_agents: tuple[str, ...] = ()
+    rotate_user_agent: bool = True
     request_timeout_s: int = 30
     rate_limit_rps: float = 0.5
     lookback_days: int = 21
@@ -151,9 +162,13 @@ class AtpScraperSource(_Section):
 class OpenWeatherSource(_Section):
     base_url: str
     api_key_env: str
-    historical_endpoint: str
-    forecast_endpoint: str
-    rate_limit_rps: float = 1.0
+    # H5: day_summary returns full-day aggregation; timemachine returns one
+    # timestamp per call (24x cost for the same backfill).
+    historical_endpoint: str = "/data/3.0/onecall/day_summary"
+    forecast_endpoint: str = "/data/3.0/onecall"
+    rate_limit_rps: float = 0.8
+    max_forecast_horizon_h: int = 168
+    on_missing_forecast: Literal["emit_null"] = "emit_null"
 
     def env_deps(self) -> Iterator[EnvDep]:
         yield EnvDep(
@@ -170,6 +185,7 @@ class OddsApiSource(_Section):
     bookmakers: tuple[str, ...]
     rate_limit_rps: float = 1.0
     closing_window_minutes: int = 15
+    coverage_start_year: int = 2020   # H11: tennis_atp coverage begins ~2020
 
     def env_deps(self) -> Iterator[EnvDep]:
         yield EnvDep(
@@ -202,8 +218,15 @@ class IntradayConflictConfig(_Section):
     log_to_run_metrics: bool = True
 
 
+class SeasonRange(_Section):
+    """H2: explicit `{start, end}` form; replaces ambiguous `[start, end]` list."""
+
+    start: int
+    end: int
+
+
 class IngestionSection(_Section):
-    history_backfill_seasons: tuple[int, int]
+    history_backfill_season_range: SeasonRange
     daily_lookforward_days: int = 7
     retry: IngestionRetry = Field(default_factory=IngestionRetry)
     dead_letter_table: str = "dead_letter"
@@ -211,22 +234,35 @@ class IngestionSection(_Section):
 
 
 class EloConfig(_Section):
+    # H10: variable K-factor + cold-start. k_base preserved for backward
+    # compatibility but not used by the v1 Elo extractor.
+    initial_rating: int = 1500
+    k_new_player: int = 40
+    k_threshold_matches: int = 30
+    k_established: int = 20
+    min_reliable_matches: int = 10
     k_base: float = 32.0
     surface_blend: float = 0.5
     glicko: bool = False
+    materialize_snapshots: bool = True   # H7: elo_snapshots row per processed match
 
 
 class MarketConfig(_Section):
-    devig_method_primary: Literal["shin", "proportional", "logit"] = "shin"
-    devig_method_fallback: Literal["shin", "proportional", "logit"] = "proportional"
+    # H9: 'logit' removed — schema/CHECK is corrected in migration 012.
+    devig_method_primary: Literal["shin", "proportional"] = "shin"
+    devig_method_fallback: Literal["shin", "proportional"] = "proportional"
     use_closing_for_backtest: bool = True
     track_odds_drift_to_close: bool = True
 
 
 class WeatherFeatureConfig(_Section):
+    # H1: read by Modeling Agent only — feature_matrix always stores clean values.
     inject_forecast_noise: bool = True
     uncertainty_buckets: tuple[str, ...] = ("low", "medium", "high")
+    # H4: forecast_horizon_h bands; missing observations -> NULL features.
+    uncertainty_bucket_thresholds: dict[str, list[int]] = Field(default_factory=dict)
     noise_sigma_by_bucket: dict[str, dict[str, float]] = Field(default_factory=dict)
+    max_obs_age_hours: int = 3
 
 
 class DriftConfig(_Section):
@@ -258,6 +294,8 @@ class XgbConfig(_Section):
     colsample_bytree: float = 0.8
     reg_lambda: float = 1.0
     tree_method: str = "hist"
+    early_stopping_rounds: int = 50
+    n_jobs: int = -1
 
 
 class LgbmConfig(_Section):
@@ -267,6 +305,8 @@ class LgbmConfig(_Section):
     feature_fraction: float = 0.8
     bagging_fraction: float = 0.8
     lambda_l2: float = 1.0
+    early_stopping_rounds: int = 50
+    n_jobs: int = -1
 
 
 class BaseLearnersConfig(_Section):
@@ -282,6 +322,7 @@ class MetaLearnerConfig(_Section):
 class CalibrationConfig(_Section):
     method: Literal["platt", "isotonic"] = "platt"
     tail_days: int = 60
+    min_calibration_samples: int = 50
 
 
 class MetricsConfig(_Section):
@@ -298,6 +339,7 @@ class EdgeConfig(_Section):
 class KellyConfig(_Section):
     fraction: float = 0.25
     max_exposure_pct: float = 0.02
+    max_total_exposure_pct: float = 0.10   # H12: same-day all-bets bankroll cap
 
 
 class ModelingSection(_Section):
@@ -433,10 +475,21 @@ class PlayerResolutionSection(_Section):
 # ---------------------------------------------------------------------------
 # Feature engineering policy knobs
 # ---------------------------------------------------------------------------
+class MinWindowSamplesConfig(_Section):
+    serve_return: int = 10
+    elo_form: int = 5
+    h2h: int = 1
+
+
 class FeatureEngineeringSection(_Section):
     retirement_counts_as_match: bool = True
     walkover_counts_as_match: bool = False
     retirement_fatigue_weight: float = 0.5
+    # H8: tier-keyed fallback for missing matches.best_of; pre-2000 Sackmann
+    # rows frequently omit this. "default" is mandatory.
+    best_of_null_fallback_by_tier: dict[str, int] = Field(default_factory=dict)
+    min_window_samples: MinWindowSamplesConfig = Field(default_factory=MinWindowSamplesConfig)
+    max_ranking_staleness_days: int = 7
 
 
 # ---------------------------------------------------------------------------

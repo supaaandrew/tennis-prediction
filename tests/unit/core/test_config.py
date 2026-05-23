@@ -17,6 +17,12 @@ from tennis.core.config import (
 from tennis.core.errors import InvalidConfigError, MissingEnvironmentError
 
 
+@pytest.fixture
+def config(config_path: Path) -> AppConfig:
+    """Loaded real config — convenience for tests that don't need the path."""
+    return load_config(config_path)
+
+
 # --------------------------------------------------------------------------
 # Loading the real config/config.yaml — guards against config drift
 # --------------------------------------------------------------------------
@@ -80,6 +86,68 @@ class TestLoadRealConfig:
 
         # Kelly disclaimer
         assert "research" in cfg.briefing.kelly_disclaimer.lower()
+
+    def test_h_audit_fixes_present(self, config: AppConfig) -> None:
+        """Regression: every H-section audit fix is locked in config."""
+
+        # H1: noise injection is in modeling, not storage
+        # (semantic — we assert inject_forecast_noise exists; the
+        # architectural rule is enforced by the absence of noise logic
+        # in the Research Agent, which has no tests yet)
+        assert config.features.weather.inject_forecast_noise is True
+
+        # H2: season range uses structured form, not list
+        assert config.ingestion.history_backfill_season_range.start == 2000
+        assert config.ingestion.history_backfill_season_range.end == 2026
+
+        # H3: per-status canonical date source policy
+        canonical = config.sources.sackmann.canonical_date_source
+        assert canonical["final"] == "sackmann"
+        assert canonical["scheduled"] == "atp_scraper"
+        assert canonical["live"] == "atp_scraper"
+
+        # H4: uncertainty bucket thresholds defined
+        thresholds = config.features.weather.uncertainty_bucket_thresholds
+        assert "low" in thresholds
+        assert "medium" in thresholds
+        assert "high" in thresholds
+        assert thresholds["low"] == [0, 6]
+        assert thresholds["medium"] == [6, 24]
+
+        # H5: correct OWM endpoint
+        assert "day_summary" in config.sources.openweather.historical_endpoint
+
+        # H7: elo snapshot materialization on
+        assert config.features.elo.materialize_snapshots is True
+
+        # H8: best_of fallback defined for GS
+        fallback = config.feature_engineering.best_of_null_fallback_by_tier
+        assert fallback["GS"] == 5
+        assert fallback["default"] == 3
+
+        # H9: 'logit' is not an accepted devig method (constraint corrected
+        # in migration 012; config Literal narrowed in Part 1).
+        from pydantic import ValidationError
+
+        from tennis.core.config import MarketConfig
+
+        with pytest.raises(ValidationError):
+            MarketConfig(devig_method_primary="logit", devig_method_fallback="shin")
+        with pytest.raises(ValidationError):
+            MarketConfig(devig_method_primary="shin", devig_method_fallback="logit")
+
+        # H10: elo cold start and K-factor present
+        assert config.features.elo.initial_rating == 1500
+        assert config.features.elo.k_new_player > config.features.elo.k_established
+
+        # H11: odds coverage start year documented
+        assert config.sources.odds_api.coverage_start_year == 2020
+
+        # H12: total exposure cap present and sane
+        assert 0 < config.modeling.kelly.max_total_exposure_pct <= 0.20
+
+        # Calibration floor
+        assert config.modeling.calibration.min_calibration_samples >= 20
 
 
 # --------------------------------------------------------------------------

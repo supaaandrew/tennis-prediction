@@ -93,6 +93,13 @@ class AgentContext:
     clock: Clock
     logger: Any         # structlog BoundLogger
 
+    def __post_init__(self) -> None:
+        # as_of must be tz-aware — mirrors the UTC-only contract on
+        # Clock/FrozenClock. A naive datetime here would silently mis-fire
+        # every PIT comparison downstream.
+        if self.as_of.tzinfo is None:
+            raise ValueError("AgentContext.as_of must be timezone-aware")
+
 
 @runtime_checkable
 class Agent(Protocol):
