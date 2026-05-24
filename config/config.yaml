@@ -114,6 +114,7 @@ sources:
     rate_limit_rps: 1.0
     closing_window_minutes: 15          # snapshot ≤ N min before start_ts == "closing"
     coverage_start_year: 2020           # H11: odds data begins ~2020
+    match_linkage_window_days: 1        # J1: window for player+date match lookup
 
 # ---------------------------------------------------------------------------
 # Ingestion behavior (Data Agent)

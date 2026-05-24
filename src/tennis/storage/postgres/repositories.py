@@ -105,6 +105,25 @@ class MatchRepository(Protocol):
     def get_by_source(self, *, source: str, source_uid: str) -> MatchRow | None: ...
     def upsert(self, row: MatchRow) -> MatchRow: ...
 
+    def find_by_players_and_date(
+        self,
+        *,
+        player_a_id: int,
+        player_b_id: int,
+        match_date: date,
+        window_days: int = 1,
+    ) -> MatchRow | None:
+        """Match where the unordered pair `{p1_id, p2_id}` equals
+        `{player_a_id, player_b_id}` and `match_date` is within
+        `window_days` of the given date. Used by the Odds API adapter to
+        link a bookmaker event (which carries no tournament/round) to an
+        already-ingested match (J1).
+
+        Returns the single matching row, or `None` when there is no match
+        OR when more than one match is in range — ambiguity is never
+        guessed; the caller dead-letters it (J1)."""
+        ...
+
     def for_training(
         self, *, season_start: int, season_end: int
     ) -> Iterable[MatchRow]:

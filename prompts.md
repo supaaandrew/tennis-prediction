@@ -347,3 +347,108 @@ in two modes — historical backfill (`day_summary`) and hourly forecast
 **What I pushed back on:**
 
 **What we changed:**
+
+---
+
+## Session 2026-05-24 (tooling) — Stop-hook reviewer hardening + project skills
+
+**Prompt:** Iteratively harden the auto-review Stop hook (`.claude/hooks/review.py`)
+and add reusable project skills. No pipeline/source code this session.
+
+**Shipped:**
+- `review.py` overhaul: installed `anthropic` into `.venv`; switched hook command
+  to plain `python`; `max_tokens` 2000→8000; modified-file content read fresh from
+  disk (by path parsed from transcript) instead of truncated transcript chunks;
+  status banner now reflects the real API outcome (ERROR / CRITICAL / clean);
+  opt-in `RUN REVIEW` gate that evolved spec.md → last user message → **last user
+  message must END with `RUN REVIEW` after `.strip()`**; `ANTHROPIC_API_KEY` loaded
+  from gitignored `.claude/hooks/.env`; model confirmed pinned to `claude-sonnet-4-6`.
+- 3 project skills: `adversarial-review`, `decisions-update`, `session-summary`.
+- `.gitignore` += `.claude/hooks/.env`.
+- DECISIONS.md: §F F5–F7, §14 tooling row, §5 `.claude/` branch, P4 row corrected
+  (444→457 tests, O1–O3→O1–O5).
+- Test count unchanged: **457 → 457** (no source changed).
+
+**Codex findings:** none this session (tooling not Codex-reviewed). The OWM
+adversarial review's 2 HIGH + 2 MEDIUM were already fixed and committed in `bff8ec5`.
+
+**New locked decisions:** F5 (opt-in `RUN REVIEW` trailing-sentinel gate),
+F6 (model pinned `claude-sonnet-4-6`, `max_tokens=8000`, accurate banner),
+F7 (`.env` key load + disk-read of modified files).
+
+**Next:** P5 — Odds API adapter (The Odds API v4). See spec.md.
+
+---
+
+## Session 2026-05-24 — P5 The Odds API adapter
+
+**Prompt:** Build the P5 Odds API adapter (`adapters/odds/`) mirroring OWM —
+lock the event→match linkage decision (§J) first, add
+`MatchRepository.find_by_players_and_date`, then client/parser/adapter, TDD.
+
+**Shipped:**
+- `src/tennis/adapters/odds/{__init__,client,parser,adapter}.py` (new).
+- `MatchRepository.find_by_players_and_date` added to Protocol
+  (`repositories.py`) + `MatchRepositoryImpl` (`impl.py`); returns the single
+  in-range match, `None` on zero **or** ambiguous (>1).
+- Config: `match_linkage_window_days: 1` added to `OddsApiSource`
+  (`config.py`) + `config/config.yaml`.
+- DECISIONS.md: new §J (J1 linkage approach 1 / J2 upcoming-match dependency +
+  pipeline order / J3 open-close post-pass); §5 topology + test counts; §14
+  commit row; coverage-year ~2009→~2020 fixed in §3.3 + §15.4; stale `logit`
+  removed from the §15.4 devig table.
+- CLAUDE.md status → P5 ✅.
+- Tests: **457 → 504** (+47: 13 client, 17 parser, 13 adapter, 4
+  find_by_players_and_date). Full unit suite green in ~4.6s, no Docker.
+
+**Codex findings:** Codex adversarial review pending (run before commit).
+Self-found during build — **the source spec's de-vig section was wrong** and
+was corrected, not inherited: (1) vig for 1.30/3.80 is ≈0.0324, not 0.0338;
+(2) proportional is 0.7451/0.2549, not 0.7435/0.2565; (3) the Shin direction
+was inverted — a correct 2-outcome Shin *expands* the favorite vs proportional
+(`p1_shin > p1_prop`) because it shades the longshot harder. Tests assert the
+mathematically correct properties (verified numerically: symmetric→0.5/0.5,
+sums to 1, favorite lifted).
+
+**New locked decisions:** J1 (exact-alias linkage, never fabricate match_id),
+J2 (ATP-scraper-before-odds pipeline order; never mint a match from odds),
+J3 (open/close computed in an adapter post-pass).
+
+**Next:** P6 — ATP scraper adapter. **Must first resolve I1**: ATP scraper
+`source_uid` must use Sackmann's `{tourney_id}:{match_num}` format or
+cross-source dedup via `UNIQUE(source, source_uid)` breaks.
+
+---
+
+## Session 2026-05-24 — P5 review + hardening (addendum to the entry above)
+
+**Prompt:** Run the auto-review + Codex adversarial review on P5, fix findings,
+move §O6→§J4, document the Shin source + degenerate-fallback warning.
+
+**Shipped (504 → 507 tests):**
+- Auto-review HIGH: `OddsApiAdapter.backfill_from_config()` derives the year
+  range from `coverage_start_year`+clock so the config value is actually used.
+- Auto-review MEDIUM: §15.5 market-signal Coverage column `2009+`→`~2020 (H11)`
+  (all 8 rows).
+- `_walk_year` hardening (Codex): visited-cursor set + strict-advance guard
+  (CRITICAL — was an unbounded loop on a repeated `next_timestamp`); non-`Mapping`
+  wrapper now a counted failure + dead-letter (HIGH — was an uncaught
+  `AttributeError` aborting the run).
+- Parser: Shin (1993) citation comment + `shin_formula_degenerated` structured
+  warning on the proportional fallback.
+- 2 new regression tests (non-advancing cursor termination, malformed wrapper).
+
+**Codex findings (adversarial review):** CRITICAL — backfill infinite loop on
+non-advancing `next_timestamp` (**fixed**); HIGH — malformed historical wrapper
+crash (**fixed**); MEDIUM — non-atomic opening/closing post-pass (**deferred**,
+documented as §J4). Auto-review final verdict: PASS, CRITICAL: None (its
+header "CRITICAL FOUND" banner was a stale first-pass artifact; the body
+Summary and per-section analysis both conclude PASS).
+
+**New locked decisions:** J4 (opening/closing post-pass is non-atomic — accepted
+v1 limitation, same class as O4; moved here from a mis-filed §O6).
+
+**Next:** P6 — ATP scraper adapter. Must first resolve I1 (`source_uid` format).
+Carry forward: re-verify any pinned numeric/spec claims (the P5 spec's de-vig
+numbers + Shin direction were wrong); guard every cursor-walk loop for
+termination; validate upstream payload shape before `.get()`.

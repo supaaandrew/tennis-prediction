@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -372,6 +372,43 @@ class MatchRepositoryImpl:
                 )
             ).scalar_one_or_none()
             return _orm_to_row(o, MatchRow) if o else None
+
+    def find_by_players_and_date(
+        self,
+        *,
+        player_a_id: int,
+        player_b_id: int,
+        match_date: date,
+        window_days: int = 1,
+    ) -> MatchRow | None:
+        """See `MatchRepository.find_by_players_and_date` (J1). Returns the
+        single in-range match, or None when zero OR >1 candidates exist."""
+        lo = match_date - timedelta(days=window_days)
+        hi = match_date + timedelta(days=window_days)
+        with self._sf() as s:
+            stmt = (
+                select(m.Match)
+                .where(m.Match.match_date >= lo)
+                .where(m.Match.match_date <= hi)
+                .where(
+                    or_(
+                        and_(
+                            m.Match.p1_id == player_a_id,
+                            m.Match.p2_id == player_b_id,
+                        ),
+                        and_(
+                            m.Match.p1_id == player_b_id,
+                            m.Match.p2_id == player_a_id,
+                        ),
+                    )
+                )
+                # Fetch two so we can detect ambiguity without scanning all.
+                .limit(2)
+            )
+            rows = s.execute(stmt).scalars().all()
+            if len(rows) != 1:
+                return None
+            return _orm_to_row(rows[0], MatchRow)
 
     def upsert(self, row: MatchRow) -> MatchRow:
         if row.start_ts is not None:

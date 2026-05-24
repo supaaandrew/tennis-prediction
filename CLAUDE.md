@@ -21,10 +21,10 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ Foundation        core/, migrations 001-009 + 011 + 012, 160 tests
 ✅ Storage layer     storage/postgres/ P1+P2, 297 tests
 ✅ P3                Sackmann adapter + player resolver, 398 tests
-✅ Hook infrastructure  CLAUDE.md, stop hook, review.py
-✅ P4                OWM weather adapter (client/parser/adapter), 444 tests
-⬜ P5                Odds API adapter
-⬜ P6                ATP scraper adapter
+✅ Hook infrastructure  CLAUDE.md, stop hook, review.py (opt-in RUN REVIEW gate, F5-F7)
+✅ P4                OWM weather adapter (client/parser/adapter), 457 tests
+✅ P5                Odds API adapter (client/parser/adapter) + match linkage, 507 tests (post-review)
+⬜ P6                ATP scraper adapter  ← resolve I1 source_uid format first
 ⬜ P7                DataAgent orchestrator
 ⬜ Research Agent    features/, point_in_time.py, Elo extractor
 ⬜ Modeling Agent    stacking ensemble, calibration, edge

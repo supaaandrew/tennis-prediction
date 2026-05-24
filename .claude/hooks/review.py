@@ -243,18 +243,21 @@ def main() -> None:
 
     # Opt-in gate, per-turn. The Stop hook fires after every user turn under
     # the same `spec.md`, so gating on spec content would run the API on
-    # every exchange. Gate instead on the LAST user-typed message: the human
-    # types "RUN REVIEW" anywhere in the turn they want reviewed; every other
-    # turn exits 0 immediately and leaves review.md untouched (so the prior
-    # verdict stays visible, which is the safest default).
+    # every exchange. Gate instead on the LAST user-typed message AND require
+    # the marker at the very END (after .strip()) so that skill templates,
+    # documentation, or audit prompts that merely *mention* "RUN REVIEW" in
+    # passing don't accidentally fire a paid API call. The human ends the
+    # turn they want reviewed with the literal sentinel "RUN REVIEW"; every
+    # other turn exits 0 immediately and leaves review.md untouched (so the
+    # prior verdict stays visible, which is the safest default).
     # `spec.md` is still loaded above and fed to the API as ground-truth
     # context when the gate passes — only the *trigger* moved.
     trigger_text = _last_user_text(transcript_path)
-    if "RUN REVIEW" not in trigger_text:
+    if not trigger_text.strip().endswith("RUN REVIEW"):
         print(
-            "AUTO REVIEW — skipped (last user message does not contain "
-            "'RUN REVIEW'). Add the marker to your next turn to enable "
-            "the API-backed review."
+            "AUTO REVIEW — skipped (last user message does not end with "
+            "'RUN REVIEW'). End your next turn with the marker on its own "
+            "trailing line to enable the API-backed review."
         )
         sys.exit(0)
 
@@ -276,6 +279,17 @@ def main() -> None:
         modified_files_content = "No modified files detected in transcript."
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # Load ANTHROPIC_API_KEY from a local .claude/hooks/.env if present (the
+    # file is gitignored), so the hook works without the key being exported
+    # into the shell. A value in the .env file takes precedence here.
+    env_file = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_file):
+        with open(env_file, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("ANTHROPIC_API_KEY="):
+                    os.environ["ANTHROPIC_API_KEY"] = line.strip().split("=", 1)[1]
+                    break
 
     # Call Anthropic API
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")

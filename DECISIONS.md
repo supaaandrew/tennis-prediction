@@ -76,7 +76,9 @@ Additional fixes 6–10 from the unblock plan (cross-cutting):
    same-day morning information (e.g. Monday-AM ranking updates for Monday
    matches). Strict superset of no-lookahead.
 3. **Pre-1991 stat coverage** is sparse in Sackmann. Effective training mass
-   2000+; market-feature training only 2009+.
+   2000+; market-feature training only 2020+ (The Odds API `tennis_atp`
+   coverage begins ~2020 — see H11; the earlier "2009" figure was corrected
+   by the H11 pre-implementation audit).
 4. **Cross-source venue dedup** by `(city, country)` is fragile —
    "Monte Carlo" vs "Monte-Carlo" forks. Defer normalization to DataAgent.
 5. **Scheduled matches without confirmed players** ("winner of QF1") cannot
@@ -98,8 +100,8 @@ Additional fixes 6–10 from the unblock plan (cross-cutting):
 
 | Suite | Count | Local | CI/Docker |
 |---|---|---|---|
-| `tests/unit/` | **402** | ✅ pass | ✅ pass |
-| `tests/unit/adapters/` | **105** | ✅ pass | n/a |
+| `tests/unit/` | **504** | ✅ pass | ✅ pass |
+| `tests/unit/adapters/` | **190** | ✅ pass | n/a |
 | `tests/integration/` (PG trigger) | **9** | ⏭ skip (no Docker locally) | ✅ when Docker + `pip install -e ".[dev]"` |
 
 Critical-path coverage (one test per rule / one test per branch):
@@ -122,6 +124,15 @@ Critical-path coverage (one test per rule / one test per branch):
 
 ```
 Tennis_Prediction_Bot/
+├── .claude/
+│   ├── settings.json         # Stop hook config
+│   ├── hooks/
+│   │   ├── review.py         # opt-in API reviewer (F5-F7)
+│   │   └── .env              # gitignored API key
+│   └── skills/
+│       ├── adversarial-review/SKILL.md
+│       ├── decisions-update/SKILL.md
+│       └── session-summary/SKILL.md
 ├── pyproject.toml             # ≥3.12; dev extras = pytest, testcontainers, ruff, mypy
 ├── .env.example               # every required env var by env tier
 ├── DECISIONS.md               # THIS FILE
@@ -158,11 +169,16 @@ Tennis_Prediction_Bot/
 │   │   │   ├── parser.py      # pure CSV parsers, zero side effects
 │   │   │   ├── resolver.py    # 4-tier player identity resolution
 │   │   │   └── adapter.py     # orchestration, DI, watermark, dead-letter
-│   │   └── owm/              # P4 — OpenWeatherMap weather adapter
+│   │   ├── owm/              # P4 — OpenWeatherMap weather adapter
+│   │   │   ├── __init__.py
+│   │   │   ├── client.py      # HTTP transport: throttle, 429 backoff, error mapping
+│   │   │   ├── parser.py      # pure day_summary/forecast parsers, zero side effects
+│   │   │   └── adapter.py     # orchestration, DI, watermark, dead-letter
+│   │   └── odds/             # P5 — The Odds API bookmaker-prices adapter
 │   │       ├── __init__.py
 │   │       ├── client.py      # HTTP transport: throttle, 429 backoff, error mapping
-│   │       ├── parser.py      # pure day_summary/forecast parsers, zero side effects
-│   │       └── adapter.py     # orchestration, DI, watermark, dead-letter
+│   │       ├── parser.py      # pure event→DTO parse + vig/shin/proportional de-vig
+│   │       └── adapter.py     # orchestration, match linkage, open/close post-pass
 │   └── agents/
 │       ├── __init__.py
 │       └── research/
@@ -170,12 +186,13 @@ Tennis_Prediction_Bot/
 │           └── validator.py   # FeatureMatrixValidator (orchestrator gate)
 └── tests/
     ├── conftest.py            # frozen_clock, repo_root, config_path
-    ├── unit/                  # 444 tests, all green locally
+    ├── unit/                  # 504 tests, all green locally
     │   ├── core/{test_clock,test_ids,test_normalize_player_name,test_errors,
     │   │       test_logging,test_config,test_di,test_lineage,test_contracts}.py
     │   ├── storage/{test_rows,test_repositories,test_session,test_impl}.py
     │   ├── adapters/sackmann/{test_parser,test_resolver,test_adapter}.py  # 105
     │   ├── adapters/owm/{test_client,test_parser,test_adapter}.py         # 42
+    │   ├── adapters/odds/{test_client,test_parser,test_adapter}.py        # 43
     │   └── agents/research/test_validator.py
     └── integration/           # auto-skip without Docker + testcontainers
         ├── conftest.py        # Postgres-container fixture with importorskip
@@ -185,7 +202,7 @@ Tennis_Prediction_Bot/
 
 Modules not yet built (Day 3+ work):
 `agents/{data,modeling,briefing}/`, `features/`, `models/`,
-`adapters/{atp_scraper,odds_api}/`, `storage/qdrant/`,
+`adapters/atp_scraper/`, `storage/qdrant/`,
 `orchestrator/`, `cli.py`.
 
 ---
@@ -431,6 +448,9 @@ Idempotent (re-normalizing produces same string). Locked examples pinned in
 | F2 | `LoggingSection.json` renamed to `json_output` (YAML alias preserved) | Avoids pydantic v2's `BaseModel.json()` shadowing. |
 | F3 | Logging tests use `capsys` not `redirect_stdout` | stdlib logging output isn't routed through Python-level stdout redirection. |
 | F4 | Migrations use raw `op.execute()` SQL (not autogenerate) | Triggers, CHECK constraints, JSONB defaults need raw SQL anyway; ORM is reconciled by tests, not auto-diff. |
+| F5 | Stop-hook reviewer (`.claude/hooks/review.py`) is opt-in: the Anthropic API fires only when the last user-typed message (text blocks only; `tool_result` blocks excluded) ends with the literal sentinel `RUN REVIEW` after `.strip()`. Absent marker → `sys.exit(0)` before any API call, `review.md` left untouched. | The Stop hook fires after every turn; an always-on review burns tokens. A trailing sentinel (not substring-anywhere, not `spec.md` content) avoids false triggers from docs/skill-templates that merely mention the marker. |
+| F6 | Reviewer model pinned to `claude-sonnet-4-6` (never an opus model); `max_tokens=8000`; status banner derived only after the API call settles (ERROR / CRITICAL / clean). | Opus is ~5× cost for no review benefit; 2000 tokens truncated multi-file reviews mid-finding; the old banner printed "✅" even when the call had failed. |
+| F7 | Reviewer loads `ANTHROPIC_API_KEY` from gitignored `.claude/hooks/.env` (then falls back to the environment), and reads each modified file's content fresh from disk by path parsed from the transcript. | Hook runs without the key exported into the shell and keeps the secret out of git; disk read avoids reviewing truncated/chunked transcript copies of the files. |
 
 ## G. (intentionally skipped)
 
@@ -508,6 +528,22 @@ reconcile the P4 session spec against the actual schema and the H1/H4/H5 rules.
 
 ---
 
+## J. Odds API adapter locks (Day 3 — P5)
+
+Locks surfaced building The Odds API adapter (`adapters/odds/`). The
+load-bearing problem is that an odds event carries no tournament/round/match_num
+— only two player-name strings + `commence_time` — so `match_id` cannot be
+computed directly and must be resolved by linkage to an already-ingested match.
+
+| # | Decision | Rationale |
+|---|---|---|
+| J1 | **Odds-event → `match_id` linkage uses approach 1.** Resolve both player names to `player_id`s via the `player_aliases` table (`PlayerAliasRepository.get(alias=normalize_player_name(name), source='odds_api')` → `PlayerAliasRow \| None`; take `.player_id`), then `MatchRepository.find_by_players_and_date(player_a_id, player_b_id, match_date, window_days)`. Resolution is **exact-alias only** by design: no shadow players are ever created from bookmaker name strings (unlike the Sackmann resolver's A9 shadow path). An unresolved name **or** a `None`/ambiguous match → `dead_letter` + continue. The adapter **never fabricates a `match_id`**. | Odds events supply none of `(tournament_id, round, match_num)` and no DOB/country/atp_id, so the Sackmann resolver's DOB+country/fuzzy/shadow tiers are inert and shadow creation would mint phantom players from bookmaker strings. Exact-alias keeps identity authoritative and routes the unknown to the dead-letter audit instead of corrupting the match graph. |
+| J2 | **Upcoming-match dependency / pipeline order.** When `find_by_players_and_date()` returns `None` for an upcoming event, `dead_letter` + continue — never create a match row from odds data alone. The match row must already exist, so within DataAgent the pipeline order (enforced in P7) is **ATP scraper first, then Odds adapter**. Historical backfill is unaffected: Sackmann rows already exist for past matches. | `odds_snapshots.match_id` is FK-style and `matches.p1_id/p2_id` are NOT NULL; minting a match from a bookmaker's two name strings (no tournament/round) would create an un-dedupable, mis-keyed match. Ordering the scrape before odds guarantees the linkage target exists for same-day upcoming events. |
+| J3 | **`is_opening`/`is_closing` are computed in an adapter post-pass**, after all snapshots for a match are inserted in the current run — not at single-insert time. Opening = the earliest `captured_at` per `(match_id, bookmaker, market)`. Closing = the latest snapshot with `captured_at ≥ start_ts - closing_window_minutes` (config, default 15; skipped when `start_ts` is NULL). The post-pass reads `list_for_match` and re-inserts corrected rows (idempotent `ON CONFLICT DO UPDATE` refreshes the flags). | A single `insert` cannot know whether its row is the earliest/latest for the match — those are set-level properties over all snapshots. Computing them per-row would mislabel every flag until the full set is present. |
+| J4 | **v1 limitation — the Odds API `_recompute_flags` opening/closing post-pass (§J3) is non-atomic.** It does read-then-write over `OddsSnapshotRepository.list_for_match()` then per-row `insert`, with no transaction/locking boundary. A concurrent ingest inserting a newer snapshot between the read and the re-write can leave temporarily stale `is_opening`/`is_closing` flags (or briefly double-flagged rows) until the next run's post-pass repairs them. Accepted for v1 — the same class of limitation as O4 (OWM non-atomic forecast writes). A proper fix needs transactional locking on the match's snapshot set (or a single atomic SQL UPDATE per match/bookmaker/market group); deferred post-v1 until the repository Protocol grows a transactional/recompute API. | Adding a locking/transactional API is repository-layer surgery beyond P5's scope. The flags are derived/repairable (every post-pass recomputes from scratch), the daily cron is single-writer in v1, and the feature extractor enforces PIT independently — so transient flag staleness self-heals and never feeds a wrong training label. |
+
+---
+
 ## 13. Build & run quickstart
 
 ```powershell
@@ -536,9 +572,12 @@ $env:DATABASE_URL = "postgresql+psycopg://user:pass@host:5432/db"
 | 1 | `4ead641 initial foundation` | Architecture + pyproject + .env.example + config.yaml + DECISIONS.md + prompts.md + 9 migrations + core/* + agents/research/validator + 159 unit tests + player_overrides stub |
 | 2 (post-codex) | `b80ce5b test: PIT trigger integration coverage + tighten node allowlist` | D1 + D2 |
 | 3 | [hash TBD] | Storage layer P1+P2 (297 tests) + Sackmann adapter P3 (398 tests at P3 close; 402 after the post-review fixes below) + pre-implementation audit fixes (migrations 011-012, config H-decisions, hook infrastructure). Codex adversarial-review fixes on P3: watermark failure-awareness, alias-collision guard, intraday-conflict date-precision gating, rank=0 normalization (see §I). |
-| 3 | [hash TBD] | OWM weather adapter P4 (444 tests): `adapters/owm/{client,parser,adapter}.py` — day_summary backfill + onecall forecast, token-bucket throttle, 429 backoff/401-fail-fast/5xx error mapping, per-venue watermark with failure-aware completion, horizon-gated forecast rows, dead-letter-and-continue, missing-coords venue skip. New locked decisions O1–O3 (§O). |
+| 3 | [hash TBD] | OWM weather adapter P4 (457 tests): `adapters/owm/{client,parser,adapter}.py` — day_summary backfill + onecall forecast, token-bucket throttle, 429 backoff/401-fail-fast/5xx error mapping, per-venue watermark with failure-aware completion, horizon-gated forecast rows, dead-letter-and-continue, missing-coords venue skip. New locked decisions O1–O5 (§O). |
+| 3 (tooling) | [hash TBD] | Dev-tooling only, no pipeline change. Hardened the Stop-hook reviewer (`.claude/hooks/review.py`): opt-in `RUN REVIEW` trailing-sentinel gate, model pinned to `claude-sonnet-4-6`, `max_tokens` 2000→8000, modified-file content read from disk, accurate status banner, `ANTHROPIC_API_KEY` from gitignored `.claude/hooks/.env`. Added 3 project skills (`adversarial-review`, `decisions-update`, `session-summary`) and a `.gitignore` entry for `.claude/hooks/.env`. Unit suite unchanged (457). New tooling decisions F5–F7 (§F). |
+| 3 | [hash TBD] | The Odds API adapter P5 (504 tests, +47): `adapters/odds/{client,parser,adapter}.py` + `MatchRepository.find_by_players_and_date` (Protocol + impl). Current + historical (next_timestamp chain-walk) ingest; token-bucket throttle and the same 429/401/5xx error mapping + API-key hygiene as OWM; event→match linkage via `find_by_players_and_date` over `player_aliases` (exact-alias, source `odds_api`, no shadow players); p1/p2 perspective via `p1_player_id` (never API outcome order); one row per devig method (shin closed-form + proportional; logit never emitted, H9); opening/closing post-pass (§J3); failure-aware watermark where resolution/linkage gaps are skips not failures (I2). New locked decisions J1–J3 (§J). Reconciled stale ~2009 odds-coverage refs to ~2020 (H11) and corrected the spec's inverted Shin direction + arithmetic (real vig≈0.0324, prop 0.7451/0.2549; Shin *expands* the favorite vs proportional). |
+| 3 (post-review) | [hash TBD] | P5 post-review hardening (504→507 tests). Auto-review fixes: added `OddsApiAdapter.backfill_from_config()` so `coverage_start_year` (H11) is actually consumed instead of silently ignored (HIGH); §15.5 market-signal Coverage column corrected `2009+`→`~2020 (H11)` on all 8 rows (MEDIUM). Codex adversarial-review fixes: `_walk_year` now guards a non-advancing/repeated `next_timestamp` (visited-cursor set + strict-advance check) — dead-letter once, count failure, break the year; never loops forever (CRITICAL); a malformed (non-`Mapping`) historical wrapper becomes a counted failure + dead-letter instead of an uncaught `AttributeError` that aborts the run (HIGH); added the Shin (1993) source citation and a `shin_formula_degenerated` structured warning on the proportional fallback. New locked decision J4 (§J): the opening/closing post-pass is non-atomic — accepted v1 limitation (deferred MEDIUM, mirrors O4). |
 
-Next session resumes at **Day 3 — Data Agent build (P5 odds / P6 ATP scraper / P7 orchestrator)**; weather (P4) and Sackmann (P3) source adapters are complete.
+Next session resumes at **Day 3 — Data Agent build (P6 ATP scraper / P7 orchestrator)**; weather (P4), Sackmann (P3), and odds (P5) source adapters are complete. P6 must first resolve I1 (ATP scraper `source_uid` format → `{tourney_id}:{match_num}`).
 
 ---
 
@@ -683,13 +722,13 @@ devig). Betfair EX EU/UK as cross-checks. Rate-limited at 1.0 rps.
 | `outcomes[player1].price` (decimal) | `p1_decimal` | > 1.0 enforced. |
 | `outcomes[player2].price` (decimal) | `p2_decimal` | > 1.0 enforced. |
 | derived | `vig` | `(1/p1_decimal + 1/p2_decimal) - 1`. |
-| derived | `p1_implied`, `p2_implied` | De-vig'd implied probabilities; method recorded in `devig_method` ∈ {shin, proportional, logit}. Shin = primary (A6). Both methods may coexist for the same snapshot (PK includes `devig_method`). |
+| derived | `p1_implied`, `p2_implied` | De-vig'd implied probabilities; method recorded in `devig_method` ∈ {shin, proportional} (logit removed by H9 / migration 012). Shin = primary (A6). Both methods coexist for the same snapshot — one row each (PK includes `devig_method`). |
 | computed flag | `is_opening` | TRUE for the earliest snapshot per `(match_id, bookmaker, market)`. |
 | computed flag | `is_closing` | TRUE for the latest snapshot with `captured_at ≥ start_ts - closing_window_minutes` (config: 15). |
 
 **Coverage limitations:**
 
-- **Tennis market on Odds API begins ~2009.** Market-derived features train only on 2009+ (§3.3).
+- **Tennis market on Odds API begins ~2020** (`coverage_start_year=2020`, H11). Market-derived features train only on 2020+; market features are NULL for ~80% of pre-2020 training rows (§3.3). The earlier "~2009" estimate predated the adapter and was corrected by the H11 audit.
 - **Pinnacle availability is uneven** for ATP250s and early-round matches; missing odds are explicitly allowed (`modeling.edge.allow_missing_odds=true`, C9). Predictions are still written; `edge_*` columns NULL.
 - **Closing line is backtest-only** (`use_closing_for_backtest=true`); live decisioning uses the snapshot at T-24h, not the closing line.
 - **Drift series.** We do NOT store every intraday tick — we keep opening + closing + (optionally) one decision-time snapshot. `odds_drift_to_close` is computed at backtest from the snapshots present.
@@ -804,14 +843,14 @@ fallback.
 
 | Feature key | Source | Derivation | Lookahead | Coverage |
 |---|---|---|---|---|
-| `p1_implied_pinnacle_opening` | Odds API | `p1_implied` from snapshot with `is_opening=TRUE`, `bookmaker='pinnacle'`, `devig_method='shin'`. | market | 2009+ |
-| `p1_implied_pinnacle_closing` | Odds API | Same with `is_closing=TRUE`. **Backtest-only**; NULL in live prediction rows. | market | 2009+ |
-| `p1_implied_pinnacle_decision` | Odds API | Latest `pinnacle` Shin snapshot with `captured_at ≤ as_of_ts`. This is the live decisioning feature. | market | 2009+ |
-| `p1_implied_proportional_decision` | Odds API | Same but `devig_method='proportional'` (fallback / cross-check). | market | 2009+ |
-| `line_movement_p1` | derived | `p1_implied_pinnacle_closing - p1_implied_pinnacle_opening`. **Backtest-only**, NULL live. | market | 2009+ |
-| `consensus_implied_p1` | Odds API | Cross-bookmaker mean of `p1_implied` at decision time (pinnacle + betfair_ex_*). | market | 2009+ |
-| `vig_pinnacle_decision` | Odds API | `vig` from the same decision-time snapshot. | market | 2009+ |
-| `odds_drift_to_close` | derived | Per-tournament average of `|line_movement|`. **Backtest-only**, NULL live. | market | 2009+ |
+| `p1_implied_pinnacle_opening` | Odds API | `p1_implied` from snapshot with `is_opening=TRUE`, `bookmaker='pinnacle'`, `devig_method='shin'`. | market | ~2020 (H11) |
+| `p1_implied_pinnacle_closing` | Odds API | Same with `is_closing=TRUE`. **Backtest-only**; NULL in live prediction rows. | market | ~2020 (H11) |
+| `p1_implied_pinnacle_decision` | Odds API | Latest `pinnacle` Shin snapshot with `captured_at ≤ as_of_ts`. This is the live decisioning feature. | market | ~2020 (H11) |
+| `p1_implied_proportional_decision` | Odds API | Same but `devig_method='proportional'` (fallback / cross-check). | market | ~2020 (H11) |
+| `line_movement_p1` | derived | `p1_implied_pinnacle_closing - p1_implied_pinnacle_opening`. **Backtest-only**, NULL live. | market | ~2020 (H11) |
+| `consensus_implied_p1` | Odds API | Cross-bookmaker mean of `p1_implied` at decision time (pinnacle + betfair_ex_*). | market | ~2020 (H11) |
+| `vig_pinnacle_decision` | Odds API | `vig` from the same decision-time snapshot. | market | ~2020 (H11) |
+| `odds_drift_to_close` | derived | Per-tournament average of `|line_movement|`. **Backtest-only**, NULL live. | market | ~2020 (H11) |
 
 Whenever `allow_missing_odds=true` and no Pinnacle snapshot exists, all
 `p1_implied_*` and downstream edges are NULL; the prediction row is still

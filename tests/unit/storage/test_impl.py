@@ -486,6 +486,59 @@ class TestMatchFilterShape:
 
 
 # ---------------------------------------------------------------------------
+# 5b. MatchRepository.find_by_players_and_date — J1 odds-linkage lookup.
+#     Cannot run the SQL on SQLite, so we verify (a) the count→result
+#     contract (0/1/2 rows → None/row/None) on a mock session and (b) the
+#     emitted SQL matches the unordered pair within the date window.
+# ---------------------------------------------------------------------------
+class TestFindByPlayersAndDate:
+    def _repo(self, rows: list[Any]) -> tuple[MatchRepositoryImpl, MagicMock]:
+        s = MagicMock()
+        s.execute.return_value.scalars.return_value.all.return_value = rows
+        return MatchRepositoryImpl(_make_mock_factory(s)), s
+
+    def test_returns_single_match_when_exactly_one(self) -> None:
+        fake = MagicMock()
+        fake.match_id = 999
+        repo, _ = self._repo([fake])
+        result = repo.find_by_players_and_date(
+            player_a_id=10, player_b_id=20, match_date=date(2024, 6, 1),
+        )
+        assert result is not None
+        assert result.match_id == 999
+
+    def test_returns_none_when_no_match(self) -> None:
+        repo, _ = self._repo([])
+        result = repo.find_by_players_and_date(
+            player_a_id=10, player_b_id=20, match_date=date(2024, 6, 1),
+        )
+        assert result is None
+
+    def test_returns_none_when_ambiguous(self) -> None:
+        # >1 in-range candidate is never guessed — caller dead-letters it.
+        repo, _ = self._repo([MagicMock(), MagicMock()])
+        result = repo.find_by_players_and_date(
+            player_a_id=10, player_b_id=20, match_date=date(2024, 6, 1),
+        )
+        assert result is None
+
+    def test_sql_matches_unordered_pair_within_window(self) -> None:
+        repo, s = self._repo([])
+        repo.find_by_players_and_date(
+            player_a_id=10, player_b_id=20,
+            match_date=date(2024, 6, 1), window_days=2,
+        )
+        stmt = s.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        # Both player-order branches present (reversed order matches too).
+        assert "10" in compiled and "20" in compiled
+        assert "OR" in compiled
+        # window_days=2 → [2024-05-30, 2024-06-03].
+        assert "2024-05-30" in compiled
+        assert "2024-06-03" in compiled
+
+
+# ---------------------------------------------------------------------------
 # 6. Helpers
 # ---------------------------------------------------------------------------
 class TestHelpers:

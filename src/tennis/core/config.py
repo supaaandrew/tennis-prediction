@@ -186,6 +186,7 @@ class OddsApiSource(_Section):
     rate_limit_rps: float = 1.0
     closing_window_minutes: int = 15
     coverage_start_year: int = 2020   # H11: tennis_atp coverage begins ~2020
+    match_linkage_window_days: int = 1  # J1: player+date match lookup window
 
     def env_deps(self) -> Iterator[EnvDep]:
         yield EnvDep(
