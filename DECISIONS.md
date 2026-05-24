@@ -98,7 +98,8 @@ Additional fixes 6–10 from the unblock plan (cross-cutting):
 
 | Suite | Count | Local | CI/Docker |
 |---|---|---|---|
-| `tests/unit/` | **159** | ✅ pass | ✅ pass |
+| `tests/unit/` | **402** | ✅ pass | ✅ pass |
+| `tests/unit/adapters/` | **105** | ✅ pass | n/a |
 | `tests/integration/` (PG trigger) | **9** | ⏭ skip (no Docker locally) | ✅ when Docker + `pip install -e ".[dev]"` |
 
 Critical-path coverage (one test per rule / one test per branch):
@@ -131,7 +132,7 @@ Tennis_Prediction_Bot/
 ├── ops/alembic.ini
 ├── migrations/
 │   ├── env.py, script.py.mako
-│   └── versions/001..009_*.py # see §3
+│   └── versions/001..009 + 011..012_*.py # see §3, §H (no 010)
 ├── src/tennis/
 │   ├── core/                  # cross-cutting primitives, no business logic
 │   │   ├── clock.py           # Clock protocol, RealClock, FrozenClock (UTC-only)
@@ -143,6 +144,20 @@ Tennis_Prediction_Bot/
 │   │   ├── config.py          # AppConfig (pydantic) + validate_environment
 │   │   ├── logging.py         # structlog JSON + recursive redactor
 │   │   └── di.py              # Container (singleton + factory scopes)
+│   ├── storage/
+│   │   └── postgres/          # P1+P2 — rows, protocols, ORM, session, impls
+│   │       ├── rows.py        # 18 frozen Row DTOs (zero SQLAlchemy)
+│   │       ├── repositories.py# 18 @runtime_checkable Protocols (zero SQLAlchemy)
+│   │       ├── models.py      # SQLAlchemy 2.0 declarative ORM
+│   │       ├── session.py     # PostgresSessionFactory (SET TIME ZONE 'UTC')
+│   │       └── impl.py        # 18 concrete repositories
+│   ├── adapters/
+│   │   ├── __init__.py
+│   │   └── sackmann/          # P3 — Sackmann GitHub mirror adapter
+│   │       ├── __init__.py
+│   │       ├── parser.py      # pure CSV parsers, zero side effects
+│   │       ├── resolver.py    # 4-tier player identity resolution
+│   │       └── adapter.py     # orchestration, DI, watermark, dead-letter
 │   └── agents/
 │       ├── __init__.py
 │       └── research/
@@ -150,18 +165,22 @@ Tennis_Prediction_Bot/
 │           └── validator.py   # FeatureMatrixValidator (orchestrator gate)
 └── tests/
     ├── conftest.py            # frozen_clock, repo_root, config_path
-    ├── unit/                  # 159 tests, all green locally
+    ├── unit/                  # 402 tests, all green locally
     │   ├── core/{test_clock,test_ids,test_normalize_player_name,test_errors,
-    │   │       test_logging,test_config,test_di,test_lineage}.py
+    │   │       test_logging,test_config,test_di,test_lineage,test_contracts}.py
+    │   ├── storage/{test_rows,test_repositories,test_session,test_impl}.py
+    │   ├── adapters/sackmann/{test_parser,test_resolver,test_adapter}.py  # 105
     │   └── agents/research/test_validator.py
-    └── integration/           # 9 tests; auto-skip without Docker + testcontainers
+    └── integration/           # auto-skip without Docker + testcontainers
         ├── conftest.py        # Postgres-container fixture with importorskip
-        └── test_pit_trigger.py
+        ├── test_pit_trigger.py
+        └── test_repositories.py
 ```
 
 Modules not yet built (Day 3+ work):
-`agents/{data,modeling,briefing}/`, `features/`, `models/`, `adapters/`,
-`storage/postgres/`, `storage/qdrant/`, `orchestrator/`, `cli.py`.
+`agents/{data,modeling,briefing}/`, `features/`, `models/`,
+`adapters/{atp_scraper,openweather,odds_api}/`, `storage/qdrant/`,
+`orchestrator/`, `cli.py`.
 
 ---
 
@@ -453,6 +472,19 @@ future readers do not have to grep the YAML to find them:
   refuses to fit on fewer rows than this; raises `CalibrationError` rather
   than silently producing a degenerate calibrator on a thin tail.
 
+## I. Data Agent / Sackmann adapter locks (Day 3 — P3 + post-review)
+
+I1 is the cross-source identity contract surfaced by the P3 build; I2-I5
+are the locks from the Codex adversarial review of the Sackmann adapter.
+
+| # | Decision | Rationale |
+|---|---|---|
+| I1 | Sackmann match `source_uid` format is `{tourney_id}:{match_num}`. The ATP scraper (P5) must use a compatible format or cross-source dedup via `UNIQUE(source, source_uid)` will create duplicate rows instead of merging them. Format must be reconciled before P5 (ATP scraper adapter) is built. | Different `source_uid` formats defeat the idempotent upsert on `(source, source_uid)` and produce two rows for the same logical match. |
+| I2 | `ingest_season` is failure-aware: it marks the season watermark `status='complete'` ONLY when zero **repository/storage** failures occurred. Validation failures (`SchemaValidationError`, `PlayerResolutionError`) are dead-lettered and do NOT block completion; any other exception (`IntegrityError`, `OperationalError`, …) writes `status='incomplete'` so the next run re-ingests (idempotent upserts make this safe). | Marking a season complete after a mid-season DB outage permanently skips every unwritten match until manual repair. Dead-lettered rows are intentionally excluded, not lost. |
+| I3 | Resolver `register()` is idempotent per `player_id` and alias-collision-safe: re-registering a player is a no-op (no duplicate index entries), and a normalized-name alias is never overwritten by a *different* `player_id` — the second player gets a `source_uid`-keyed exact alias, a warning is logged, and the ambiguous name falls through to the DOB+country tier. | Two ATP IDs sharing a normalized name (e.g. "J. Johansson") would otherwise collapse into one `player_id`, poisoning winner/loser resolution. |
+| I4 | Intraday-conflict detection is gated on date precision. `ParsedMatch.date_precision ∈ {'day','tournament_week'}`; Sackmann rows are `'tournament_week'` and are NEVER conflict-flagged. Only `'day'`-precision sources (ATP scraper, which has `start_ts`) feed the audit. | All Sackmann matches share one `tourney_date`, so day-granularity conflict logic would flag normal multi-round progression as a same-day conflict. Audit-only per A10 — no training impact. |
+| I5 | Embedded match-row ranks are normalized in the parser: `winner_rank`/`loser_rank` `<= 0` → NULL; `*_rank_points` `< 0` → NULL (0 is valid). | A Sackmann `rank=0` would fail `player_rankings` `CHECK(rank > 0)` inside `_ingest_match` and dead-letter the entire match row, dropping valid match facts and stats. |
+
 ---
 
 ## 13. Build & run quickstart
@@ -482,6 +514,7 @@ $env:DATABASE_URL = "postgresql+psycopg://user:pass@host:5432/db"
 |---|---|---|
 | 1 | `4ead641 initial foundation` | Architecture + pyproject + .env.example + config.yaml + DECISIONS.md + prompts.md + 9 migrations + core/* + agents/research/validator + 159 unit tests + player_overrides stub |
 | 2 (post-codex) | `b80ce5b test: PIT trigger integration coverage + tighten node allowlist` | D1 + D2 |
+| 3 | [hash TBD] | Storage layer P1+P2 (297 tests) + Sackmann adapter P3 (398 tests at P3 close; 402 after the post-review fixes below) + pre-implementation audit fixes (migrations 011-012, config H-decisions, hook infrastructure). Codex adversarial-review fixes on P3: watermark failure-awareness, alias-collision guard, intraday-conflict date-precision gating, rank=0 normalization (see §I). |
 
 Next session resumes at **Day 3 — Data Agent build** (matches/players ingest, Sackmann adapter, player resolver, intraday_conflict pass, dead_letter integration).
 

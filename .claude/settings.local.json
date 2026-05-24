@@ -31,7 +31,14 @@
       "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 25)",
       "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 10)",
       "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/integration -q 2>&1 | Select-Object -Last 30)",
-      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1)"
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -c \"import rapidfuzz; print\\(rapidfuzz.__version__\\)\")",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m pip install \"rapidfuzz>=3.9\" --quiet; .\\\\.venv\\\\Scripts\\\\python.exe -c \"import rapidfuzz; from rapidfuzz import fuzz, process; print\\('rapidfuzz', rapidfuzz.__version__\\)\")",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -c \"import tennis.adapters.sackmann as s; from tennis.adapters.sackmann import parser, resolver, adapter; print\\('imports OK'\\); print\\('SackmannAdapter', adapter.SackmannAdapter is not None\\)\")",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/adapters -q 2>&1 | Select-Object -Last 40)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m ruff check src/tennis/adapters tests/unit/adapters 2>&1 | Select-Object -Last 40)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -c \"from tennis.adapters.sackmann import parser, resolver, adapter; print\\('OK'\\); print\\('SeasonResult fields:', [f for f in adapter.SeasonResult.__dataclass_fields__]\\); print\\('ParsedMatch has date_precision:', 'date_precision' in parser.ParsedMatch.__dataclass_fields__\\)\")",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/adapters -q 2>&1 | Select-Object -Last 3; echo \"=== full unit ===\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 3)"
     ]
   }
 }
