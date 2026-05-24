@@ -38,7 +38,11 @@
       "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/adapters -q 2>&1 | Select-Object -Last 40)",
       "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m ruff check src/tennis/adapters tests/unit/adapters 2>&1 | Select-Object -Last 40)",
       "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -c \"from tennis.adapters.sackmann import parser, resolver, adapter; print\\('OK'\\); print\\('SeasonResult fields:', [f for f in adapter.SeasonResult.__dataclass_fields__]\\); print\\('ParsedMatch has date_precision:', 'date_precision' in parser.ParsedMatch.__dataclass_fields__\\)\")",
-      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/adapters -q 2>&1 | Select-Object -Last 3; echo \"=== full unit ===\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 3)"
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/adapters -q 2>&1 | Select-Object -Last 3; echo \"=== full unit ===\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 3)",
+      "Bash(env -u ANTHROPIC_API_KEY python3 .claude/hooks/review.py)",
+      "Bash(echo \"exit=$?\")",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 8)",
+      "Bash(git check-ignore *)"
     ]
   }
 }
