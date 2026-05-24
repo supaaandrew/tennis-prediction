@@ -1,3 +1,5 @@
+# Create .gitignore with everything you need
+@"
 # Virtual environment
 .venv/
 venv/
@@ -36,8 +38,9 @@ Thumbs.db
 # Data cache
 data/
 *.csv
+"@ | Out-File -FilePath .gitignore -Encoding utf8
 
-# Generated session artifacts (Stop-hook review + per-session spec)
+# Auto-generated review files
 review.md
 review_history.md
 spec.md

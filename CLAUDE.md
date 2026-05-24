@@ -18,19 +18,18 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 
 ## Current build status
 
-Update this section after every session.
-
-✅ Foundation     core/, migrations 001-009 + 011 + 012, 160 tests
-✅ Storage layer  storage/postgres/ P1+P2, 297 tests
-🔨 P3             Sackmann adapter + player resolver (in progress)
-⬜ P4             Player resolver (may be merged into P3)
-⬜ P5             OWM + Odds API + ATP scraper adapters
-⬜ P6             DataAgent orchestrator
-⬜ P7             Codex review + commit
-⬜ Research Agent features/, point_in_time.py, Elo extractor
-⬜ Modeling Agent stacking ensemble, calibration, edge
-⬜ Briefing Agent Claude API, RAG, email
-⬜ Orchestrator   pipeline.py, cron, heartbeat
+✅ Foundation        core/, migrations 001-009 + 011 + 012, 160 tests
+✅ Storage layer     storage/postgres/ P1+P2, 297 tests
+✅ P3                Sackmann adapter + player resolver, 398 tests
+✅ Hook infrastructure  CLAUDE.md, stop hook, review.py
+⬜ P4                OWM weather adapter
+⬜ P5                Odds API adapter
+⬜ P6                ATP scraper adapter
+⬜ P7                DataAgent orchestrator
+⬜ Research Agent    features/, point_in_time.py, Elo extractor
+⬜ Modeling Agent    stacking ensemble, calibration, edge
+⬜ Briefing Agent    Claude API, RAG, email
+⬜ Orchestrator      pipeline.py, cron, heartbeat
 
 ---
 
@@ -110,7 +109,7 @@ Match src/tennis/core/ style exactly:
 ## Decisions pending (address before building)
 - I1: ATP scraper source_uid format must match Sackmann's
   `{tourney_id}:{match_num}` format for cross-source dedup
-  to work. Resolve before P5 (ATP scraper adapter) — see
+  to work. Resolve before P6 (ATP scraper adapter) — see
   DECISIONS.md §I1.
 
 ---
