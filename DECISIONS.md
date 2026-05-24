@@ -153,10 +153,15 @@ Tennis_Prediction_Bot/
 │   │       └── impl.py        # 18 concrete repositories
 │   ├── adapters/
 │   │   ├── __init__.py
-│   │   └── sackmann/          # P3 — Sackmann GitHub mirror adapter
+│   │   ├── sackmann/          # P3 — Sackmann GitHub mirror adapter
+│   │   │   ├── __init__.py
+│   │   │   ├── parser.py      # pure CSV parsers, zero side effects
+│   │   │   ├── resolver.py    # 4-tier player identity resolution
+│   │   │   └── adapter.py     # orchestration, DI, watermark, dead-letter
+│   │   └── owm/              # P4 — OpenWeatherMap weather adapter
 │   │       ├── __init__.py
-│   │       ├── parser.py      # pure CSV parsers, zero side effects
-│   │       ├── resolver.py    # 4-tier player identity resolution
+│   │       ├── client.py      # HTTP transport: throttle, 429 backoff, error mapping
+│   │       ├── parser.py      # pure day_summary/forecast parsers, zero side effects
 │   │       └── adapter.py     # orchestration, DI, watermark, dead-letter
 │   └── agents/
 │       ├── __init__.py
@@ -165,11 +170,12 @@ Tennis_Prediction_Bot/
 │           └── validator.py   # FeatureMatrixValidator (orchestrator gate)
 └── tests/
     ├── conftest.py            # frozen_clock, repo_root, config_path
-    ├── unit/                  # 402 tests, all green locally
+    ├── unit/                  # 444 tests, all green locally
     │   ├── core/{test_clock,test_ids,test_normalize_player_name,test_errors,
     │   │       test_logging,test_config,test_di,test_lineage,test_contracts}.py
     │   ├── storage/{test_rows,test_repositories,test_session,test_impl}.py
     │   ├── adapters/sackmann/{test_parser,test_resolver,test_adapter}.py  # 105
+    │   ├── adapters/owm/{test_client,test_parser,test_adapter}.py         # 42
     │   └── agents/research/test_validator.py
     └── integration/           # auto-skip without Docker + testcontainers
         ├── conftest.py        # Postgres-container fixture with importorskip
@@ -179,7 +185,7 @@ Tennis_Prediction_Bot/
 
 Modules not yet built (Day 3+ work):
 `agents/{data,modeling,briefing}/`, `features/`, `models/`,
-`adapters/{atp_scraper,openweather,odds_api}/`, `storage/qdrant/`,
+`adapters/{atp_scraper,odds_api}/`, `storage/qdrant/`,
 `orchestrator/`, `cli.py`.
 
 ---
@@ -487,6 +493,21 @@ are the locks from the Codex adversarial review of the Sackmann adapter.
 
 ---
 
+## O. OWM weather adapter locks (Day 3 — P4)
+
+Locks surfaced building the OpenWeatherMap adapter (`adapters/owm/`). These
+reconcile the P4 session spec against the actual schema and the H1/H4/H5 rules.
+
+| # | Decision | Rationale |
+|---|---|---|
+| O1 | The forecast uncertainty bucket (H4) is computed at parse time **only as a skip-signal**, never persisted. `WeatherObservationRow` has no bucket column — it stores `forecast_horizon_h` and the Modeling Agent derives the noise bucket at train time (H1, §15.5). A forecast hour whose horizon exceeds the `high` band upper bound (`max_forecast_horizon_h`=168) or is negative returns `None` from `parse_forecast_hour` and is dropped. | Persisting a bucket would bake a config-derived value into storage, violating H1 reproducibility; the row need only carry the raw horizon. Dropping out-of-range hours keeps the forecast table within the modelled window. |
+| O2 | `parse_forecast_hour` takes the `thresholds` mapping as an explicit keyword argument (sourced from `config.features.weather.uncertainty_bucket_thresholds`); it is never hard-coded in the parser. The adapter reads the config once and threads it through. | The session spec's 3-arg signature would have forced hard-coded bands, violating the non-negotiable "all thresholds from AppConfig" rule and producing silent drift if config changed. |
+| O3 | `precip_mm` provenance differs by endpoint per §15.3: forecast (`onecall.hourly`) sums `rain.1h + snow.1h` (missing → 0.0, never NULL); `day_summary` uses `precipitation.total` (missing → 0.0). `day_summary` carries no cloud cover, so `cloud_pct` is always NULL for hindcast rows. Hindcast `observed_at` is the summarised date at 00:00 UTC, supplied by the adapter (the parser is endpoint-shape-pure and time-agnostic). The forecast parser also coerces non-numeric precipitation components to 0.0 and clamps the final `precip_mm` to ≥ 0.0 — negative precipitation is physically invalid and would silently poison feature stats. | Snow-only precipitation would otherwise be dropped from forecasts; midnight-UTC `observed_at` gives a deterministic, at-or-before key for `nearest_at_or_before` feature lookups within the match day; malformed upstream payloads must not be persisted as-is. |
+| O4 | **v1 limitation — forecast hourly ingestion is non-atomic per venue.** The `WeatherObservationRepository` Protocol exposes only `upsert(row)` (no batch / no transaction context), so a mid-loop upsert failure leaves earlier hours committed. The adapter cannot roll back, but it MUST make the partial state observable: log a `owm_forecast_partial_venue_ingestion` warning naming `venue_id` and `rows_written`, and include `rows_written_before_failure` in the dead-letter payload. Resolving the limitation properly (per-venue transaction boundary) is deferred until the repository Protocol grows a batch/transactional API. | Adding a transactional API to the Protocol is repository-layer surgery beyond P4's scope; meanwhile, downstream consumers and operators must be able to detect partial venue snapshots rather than have them silently feed feature generation. |
+| O5 | **`VenueRepository.get` exceptions are per-venue fault-isolated.** A raised exception (DB timeout, connection reset, driver error) from coord lookup is logged, dead-lettered with `payload={"venue_id": venue_id}` and scope `venue_resolution:{venue_id}`, then converted to a None coord return so the adapter continues with the next venue. Both `backfill` and `fetch_forecasts` share this isolation via `_venue_coords`. | Letting a single flaky `venues.get()` propagate would abort the entire backfill on the first transient DB blip — the opposite of the per-item fault isolation the adapter's dead-letter pattern is built for. |
+
+---
+
 ## 13. Build & run quickstart
 
 ```powershell
@@ -515,8 +536,9 @@ $env:DATABASE_URL = "postgresql+psycopg://user:pass@host:5432/db"
 | 1 | `4ead641 initial foundation` | Architecture + pyproject + .env.example + config.yaml + DECISIONS.md + prompts.md + 9 migrations + core/* + agents/research/validator + 159 unit tests + player_overrides stub |
 | 2 (post-codex) | `b80ce5b test: PIT trigger integration coverage + tighten node allowlist` | D1 + D2 |
 | 3 | [hash TBD] | Storage layer P1+P2 (297 tests) + Sackmann adapter P3 (398 tests at P3 close; 402 after the post-review fixes below) + pre-implementation audit fixes (migrations 011-012, config H-decisions, hook infrastructure). Codex adversarial-review fixes on P3: watermark failure-awareness, alias-collision guard, intraday-conflict date-precision gating, rank=0 normalization (see §I). |
+| 3 | [hash TBD] | OWM weather adapter P4 (444 tests): `adapters/owm/{client,parser,adapter}.py` — day_summary backfill + onecall forecast, token-bucket throttle, 429 backoff/401-fail-fast/5xx error mapping, per-venue watermark with failure-aware completion, horizon-gated forecast rows, dead-letter-and-continue, missing-coords venue skip. New locked decisions O1–O3 (§O). |
 
-Next session resumes at **Day 3 — Data Agent build** (matches/players ingest, Sackmann adapter, player resolver, intraday_conflict pass, dead_letter integration).
+Next session resumes at **Day 3 — Data Agent build (P5 odds / P6 ATP scraper / P7 orchestrator)**; weather (P4) and Sackmann (P3) source adapters are complete.
 
 ---
 

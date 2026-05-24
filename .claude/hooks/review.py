@@ -6,9 +6,53 @@ Exits 1 (blocks session) if CRITICAL findings. Exits 0 if clean.
 """
 
 import json
-import sys
 import os
+import re
+import sys
 from datetime import datetime, timezone
+
+
+# Patterns that ALWAYS mean zero criticals. Checked before any positive
+# signal so phrasing like "### CRITICAL\n\nNone found." or a summary table
+# row "| CRITICAL | 0 |" doesn't trip a false-positive on the bare word.
+_NO_CRITICAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bno critical\b"),
+    re.compile(r"\b0 critical\b"),
+    re.compile(r"\bzero critical\b"),
+    # ## CRITICAL\n\nNone | N/A | — | --- | nothing
+    re.compile(r"#{1,6}\s+critical\b[^\n]*\n+\s*(?:none|n/a|—|---|nothing)\b"),
+    # | CRITICAL | 0 |  — summary-table row with zero count
+    re.compile(r"\|\s*critical\s*\|\s*0\s*\|"),
+)
+
+# Patterns that mean a real CRITICAL finding was raised. Only consulted
+# when no _NO_CRITICAL_PATTERNS matched.
+_HAS_CRITICAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # | CRITICAL | N |  with N >= 1
+    re.compile(r"\|\s*critical\s*\|\s*[1-9]\d*\s*\|"),
+    # "N CRITICAL" prose with N >= 1
+    re.compile(r"\b[1-9]\d*\s+critical\b"),
+    # **CRITICAL** / [CRITICAL] severity tag
+    re.compile(r"\*\*critical\b"),
+    re.compile(r"\[critical\b"),
+)
+
+
+def _detect_critical(review: str) -> bool:
+    """Return True iff the review actually raised a CRITICAL finding.
+
+    Negative signals (explicit zero / "None found" under a heading / table
+    row with 0) win first. If none fire, structural positive signals are
+    checked. As a conservative fallback when neither side matches but the
+    word ``critical`` is present, treat it as a finding — better to block
+    a session unnecessarily than to merge with an unrecognised CRITICAL.
+    """
+    lowered = review.lower()
+    if any(pat.search(lowered) for pat in _NO_CRITICAL_PATTERNS):
+        return False
+    if any(pat.search(lowered) for pat in _HAS_CRITICAL_PATTERNS):
+        return True
+    return "critical" in lowered
 
 
 def load_file_safe(path: str, default: str = "") -> str:
@@ -70,12 +114,65 @@ def _content_blocks(entry: object) -> list:
     return content if isinstance(content, list) else []
 
 
-def extract_modified_files(transcript_path: str) -> dict[str, str]:
-    """Parse transcript for Write/Edit/MultiEdit tool calls."""
+def _last_user_text(transcript_path: str) -> str:
+    """Return the text of the most recent user-typed message, or "".
+
+    A `role="user"` transcript entry can be either a real user message
+    (text content blocks) or a `tool_result` the harness forwarded back to
+    the model — only the former counts as "the last thing the user said".
+    We scan the whole transcript and remember the last qualifying entry.
+    Missing/unreadable transcript → empty string (gate will skip).
+    """
+    if not transcript_path or not os.path.exists(transcript_path):
+        return ""
+    last_text = ""
+    for entry in _iter_transcript_entries(transcript_path):
+        if not isinstance(entry, dict):
+            continue
+        inner = entry.get("message")
+        msg = inner if isinstance(inner, dict) else entry
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        # Legacy/string form: the whole content is the user's text.
+        if isinstance(content, str):
+            last_text = content
+            continue
+        if not isinstance(content, list):
+            continue
+        # Block-list form: keep only text blocks. `tool_result` blocks
+        # share role=user but are harness-injected, not user-typed.
+        texts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                value = block.get("text")
+                if isinstance(value, str):
+                    texts.append(value)
+        if texts:
+            last_text = "\n".join(texts)
+    return last_text
+
+
+def extract_modified_files(transcript_path: str, cwd: str) -> dict[str, str]:
+    """Return ``{path: current_disk_content}`` for files written this session.
+
+    The transcript is parsed only for the *list of paths* touched by
+    Write/Edit/MultiEdit tool calls; the actual content is then read from
+    disk. This is deliberate — transcript entries can be chunked, redacted,
+    or truncated, so the content embedded there is not a reliable mirror of
+    what the file ended up as. Reading from disk guarantees the reviewer
+    sees the final, complete file content (including any later edits to the
+    same path within the session).
+
+    Paths that no longer exist on disk (e.g. the session deleted or moved
+    them) are silently skipped — the reviewer still learns the path was
+    touched via the absence of stale content from the transcript.
+    """
     if not transcript_path or not os.path.exists(transcript_path):
         return {}
 
-    modified: dict[str, str] = {}
+    paths: list[str] = []
+    seen: set[str] = set()
     write_tools = {"Write", "Edit", "MultiEdit", "write", "edit"}
 
     for entry in _iter_transcript_entries(transcript_path):
@@ -90,14 +187,26 @@ def extract_modified_files(transcript_path: str) -> dict[str, str]:
             if not isinstance(inp, dict):
                 continue
             path = inp.get("file_path") or inp.get("path") or ""
-            content_written = (
-                inp.get("content")
-                or inp.get("new_string")
-                or inp.get("new_content")
-                or ""
-            )
-            if path:
-                modified[path] = content_written
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
+
+    modified: dict[str, str] = {}
+    for path in paths:
+        # os.path.join keeps `path` as-is when it is already absolute,
+        # so this correctly handles both absolute Write paths and any
+        # relative paths that older transcript shapes might carry.
+        full_path = os.path.join(cwd, path)
+        if not os.path.exists(full_path):
+            continue
+        try:
+            with open(full_path, encoding="utf-8") as fh:
+                modified[path] = fh.read()
+        except Exception:
+            # Binary file, permission error, or transient IO — skip
+            # rather than poison the review with a partial read.
+            continue
 
     return modified
 
@@ -131,16 +240,36 @@ def main() -> None:
         os.path.join(cwd, "spec.md"),
         default="No spec.md found for this session."
     )
+
+    # Opt-in gate, per-turn. The Stop hook fires after every user turn under
+    # the same `spec.md`, so gating on spec content would run the API on
+    # every exchange. Gate instead on the LAST user-typed message: the human
+    # types "RUN REVIEW" anywhere in the turn they want reviewed; every other
+    # turn exits 0 immediately and leaves review.md untouched (so the prior
+    # verdict stays visible, which is the safest default).
+    # `spec.md` is still loaded above and fed to the API as ground-truth
+    # context when the gate passes — only the *trigger* moved.
+    trigger_text = _last_user_text(transcript_path)
+    if "RUN REVIEW" not in trigger_text:
+        print(
+            "AUTO REVIEW — skipped (last user message does not contain "
+            "'RUN REVIEW'). Add the marker to your next turn to enable "
+            "the API-backed review."
+        )
+        sys.exit(0)
+
     claude_md = load_file_safe(
         os.path.join(cwd, "CLAUDE.md"),
         default="No CLAUDE.md found."
     )
 
-    # Extract modified files from transcript
-    modified = extract_modified_files(transcript_path)
+    # Extract modified files from transcript. Paths come from the transcript;
+    # content is re-read from disk so the reviewer sees the final, complete
+    # state of each file — not a potentially truncated transcript chunk.
+    modified = extract_modified_files(transcript_path, cwd)
     if modified:
         modified_files_content = "\n\n".join(
-            f"### {path}\n```\n{content[:3000]}\n```"
+            f"### {path}\n```\n{content}\n```"
             for path, content in modified.items()
         )
     else:
@@ -164,13 +293,14 @@ def main() -> None:
     # Import lazily so the no-key path above never requires the SDK, and an
     # absent/broken anthropic install degrades to an ERROR review (exit 0)
     # rather than an unhandled ImportError that crashes the Stop hook.
+    review_failed = False
     try:
         import anthropic
 
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2000,
+            max_tokens=8000,
             system=f"""You are an adversarial code reviewer for a
 production ATP tennis prediction system.
 
@@ -207,16 +337,24 @@ Report findings by severity."""
         review = response.content[0].text
     except Exception as exc:
         review = f"ERROR: API call failed — {exc}"
+        review_failed = True
 
-    # Determine exit code. Block only on a genuine CRITICAL finding — guard
-    # against false positives like "No critical issues" / "0 critical".
-    lowered = review.lower()
-    is_critical = "critical" in lowered and not (
-        "no critical" in lowered or "0 critical" in lowered
-    )
-
-    # Write review output
-    status = "❌ CRITICAL FOUND — session blocked" if is_critical else "✅ No critical issues"
+    # Determine status AFTER the API call settles. Three outcomes:
+    #   - review_failed: the SDK/network/auth blew up — never claim ✅
+    #   - CRITICAL    : a genuine finding
+    #   - clean       : review returned with no critical flagged
+    # Exit code blocks only on a real CRITICAL — infrastructure failures
+    # surface in the banner but don't gate the session.
+    if review_failed:
+        status = "❗ ERROR — review did not complete"
+        is_critical = False
+    else:
+        is_critical = _detect_critical(review)
+        status = (
+            "❌ CRITICAL FOUND — session blocked"
+            if is_critical
+            else "✅ No critical issues"
+        )
 
     review_content = f"""# Auto Review — {timestamp}
 Status: {status}

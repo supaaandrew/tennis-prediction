@@ -5,7 +5,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "python3 .claude/hooks/review.py",
+              "command": "python .claude/hooks/review.py",
               "timeout": 120
             }
           ]

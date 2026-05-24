@@ -42,7 +42,17 @@
       "Bash(env -u ANTHROPIC_API_KEY python3 .claude/hooks/review.py)",
       "Bash(echo \"exit=$?\")",
       "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 8)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(python3 .claude/hooks/review.py)",
+      "Bash(.venv/Scripts/python.exe .claude/hooks/review.py)",
+      "Bash(.venv/Scripts/python.exe -c \"import anthropic; print\\('anthropic', anthropic.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pip list)",
+      "Bash(.venv/Scripts/python.exe -m pip install anthropic)",
+      "Bash(python .claude/hooks/review.py)",
+      "Bash(python -c ' *)",
+      "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit -q)",
+      "Read(//c/Users/Andrew/Documents/Tennis_Prediction_Bot/**)",
+      "Bash(echo \"EXIT_CODE=$?\")"
     ]
   }
 }

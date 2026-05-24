@@ -22,7 +22,7 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ Storage layer     storage/postgres/ P1+P2, 297 tests
 ✅ P3                Sackmann adapter + player resolver, 398 tests
 ✅ Hook infrastructure  CLAUDE.md, stop hook, review.py
-⬜ P4                OWM weather adapter
+✅ P4                OWM weather adapter (client/parser/adapter), 444 tests
 ⬜ P5                Odds API adapter
 ⬜ P6                ATP scraper adapter
 ⬜ P7                DataAgent orchestrator

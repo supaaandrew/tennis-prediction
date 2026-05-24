@@ -261,17 +261,36 @@ Required env vars by env:
 
 ### Day 3 — Data Agent
 
-**Goal:**
+> Day 3 spans the source adapters (P3 Sackmann, P4 OWM) through to the
+> DataAgent orchestrator (P7). Entries below are per-session.
 
-**Claude.ai decisions:**
+#### P4 — OpenWeatherMap weather adapter (2026-05-23)
 
-**Claude Code prompt used:**
+**Goal:** Fetch weather and write `weather_observations` via the weather repo,
+in two modes — historical backfill (`day_summary`) and hourly forecast
+(`onecall`) — mirroring the P3 Sackmann adapter pattern.
 
 **Architecture output summary:**
+- `adapters/owm/client.py` — `OWMClient` protocol + `HttpOWMClient` over the
+  shared `HttpClient`. Token-bucket throttle (`rate_limit_rps`), 429 →
+  exponential backoff (max 3 retries) → `RateLimitError`, 401 → `AdapterError`
+  (no retry), other non-200 → `UpstreamUnavailableError`. `sleep`/`monotonic`
+  injectable; API key sent as `appid`, never logged.
+- `adapters/owm/parser.py` — pure `parse_day_summary` / `parse_forecast_hour` +
+  `uncertainty_bucket` helper. tz-aware guards, K→°C, missing fields → None.
+- `adapters/owm/adapter.py` — `OWMAdapter.backfill` / `.fetch_forecasts`,
+  per-venue watermark with failure-aware completion, missing-coords skip (not
+  dead-lettered), dead-letter-and-continue. `BackfillResult`/`ForecastResult`.
+- 42 new unit tests (444 total), all green in ~2s. No Docker.
 
-**What I pushed back on:**
-
-**What we changed:**
+**What we changed (spec ↔ codebase reconciliation):**
+- Used real names: `WeatherObservationRow` / `WeatherObservationRepository.upsert`
+  (spec said `WeatherObsRow` / `upsert_observation`).
+- `uncertainty_bucket` is a skip-signal, not a stored column (O1); the row
+  persists only `forecast_horizon_h`.
+- `parse_forecast_hour` takes `thresholds` from config — never hard-coded (O2).
+- Forecast `precip_mm` sums rain+snow per §15.3 (O3).
+- New locked decisions **O1–O3** recorded in DECISIONS.md §O.
 
 ### Day 4 — Research Agent
 
