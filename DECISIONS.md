@@ -174,11 +174,16 @@ Tennis_Prediction_Bot/
 │   │   │   ├── client.py      # HTTP transport: throttle, 429 backoff, error mapping
 │   │   │   ├── parser.py      # pure day_summary/forecast parsers, zero side effects
 │   │   │   └── adapter.py     # orchestration, DI, watermark, dead-letter
-│   │   └── odds/             # P5 — The Odds API bookmaker-prices adapter
+│   │   ├── odds/             # P5 — The Odds API bookmaker-prices adapter
+│   │   │   ├── __init__.py
+│   │   │   ├── client.py      # HTTP transport: throttle, 429 backoff, error mapping
+│   │   │   ├── parser.py      # pure event→DTO parse + vig/shin/proportional de-vig
+│   │   │   └── adapter.py     # orchestration, match linkage, open/close post-pass
+│   │   └── atp_scraper/       # P6 — ATP website (atptour.com) scraper adapter
 │   │       ├── __init__.py
-│   │       ├── client.py      # HTTP transport: throttle, 429 backoff, error mapping
-│   │       ├── parser.py      # pure event→DTO parse + vig/shin/proportional de-vig
-│   │       └── adapter.py     # orchestration, match linkage, open/close post-pass
+│   │       ├── client.py      # HTTP transport: UA rotation, throttle, 401/403/429/5xx
+│   │       ├── parser.py      # pure HTML→DTO parse (BeautifulSoup), per-row isolation
+│   │       └── adapter.py     # orchestration, §K1 match_id merge, shadow resolution
 │   └── agents/
 │       ├── __init__.py
 │       └── research/
@@ -193,7 +198,11 @@ Tennis_Prediction_Bot/
     │   ├── adapters/sackmann/{test_parser,test_resolver,test_adapter}.py  # 105
     │   ├── adapters/owm/{test_client,test_parser,test_adapter}.py         # 42
     │   ├── adapters/odds/{test_client,test_parser,test_adapter}.py        # 43
+    │   ├── adapters/atp_scraper/{conftest,test_client,test_parser,test_adapter}.py # 53 (P6)
     │   └── agents/research/test_validator.py
+    ├── fixtures/
+    │   └── atp_scraper/        # P6 — real-shape ATP HTML fragments for parser tests
+    │       └── {index,tournament_matches,naive_start_ts,intraday_conflict}.html
     └── integration/           # auto-skip without Docker + testcontainers
         ├── conftest.py        # Postgres-container fixture with importorskip
         ├── test_pit_trigger.py
@@ -505,7 +514,7 @@ are the locks from the Codex adversarial review of the Sackmann adapter.
 
 | # | Decision | Rationale |
 |---|---|---|
-| I1 | Sackmann match `source_uid` format is `{tourney_id}:{match_num}`. The ATP scraper (P5) must use a compatible format or cross-source dedup via `UNIQUE(source, source_uid)` will create duplicate rows instead of merging them. Format must be reconciled before P5 (ATP scraper adapter) is built. | Different `source_uid` formats defeat the idempotent upsert on `(source, source_uid)` and produce two rows for the same logical match. |
+| I1 | ~~Sackmann match `source_uid` format is `{tourney_id}:{match_num}`. The ATP scraper must use a compatible format or cross-source dedup via `UNIQUE(source, source_uid)` will create duplicate rows.~~ **RESOLVED in P6 by §K1–§K4.** Cross-source dedup does NOT go through `(source, source_uid)` — the scraper deliberately uses a *distinct* `source_uid` format (§K2) and dedup happens on the shared `match_id` PK via reconciliation (§K1) plus a PK-aware `upsert` (§K4). The two sources agree on `match_id` because the scraper hashes the tournament-week start date (§K3), mirroring Sackmann's `tourney_date`. | Different `source_uid` formats defeat an idempotent upsert keyed on `(source, source_uid)`; keying dedup on the deterministic `match_id` hash instead lets each source keep its own natural `source_uid` while still collapsing to one logical match row. |
 | I2 | `ingest_season` is failure-aware: it marks the season watermark `status='complete'` ONLY when zero **repository/storage** failures occurred. Validation failures (`SchemaValidationError`, `PlayerResolutionError`) are dead-lettered and do NOT block completion; any other exception (`IntegrityError`, `OperationalError`, …) writes `status='incomplete'` so the next run re-ingests (idempotent upserts make this safe). | Marking a season complete after a mid-season DB outage permanently skips every unwritten match until manual repair. Dead-lettered rows are intentionally excluded, not lost. |
 | I3 | Resolver `register()` is idempotent per `player_id` and alias-collision-safe: re-registering a player is a no-op (no duplicate index entries), and a normalized-name alias is never overwritten by a *different* `player_id` — the second player gets a `source_uid`-keyed exact alias, a warning is logged, and the ambiguous name falls through to the DOB+country tier. | Two ATP IDs sharing a normalized name (e.g. "J. Johansson") would otherwise collapse into one `player_id`, poisoning winner/loser resolution. |
 | I4 | Intraday-conflict detection is gated on date precision. `ParsedMatch.date_precision ∈ {'day','tournament_week'}`; Sackmann rows are `'tournament_week'` and are NEVER conflict-flagged. Only `'day'`-precision sources (ATP scraper, which has `start_ts`) feed the audit. | All Sackmann matches share one `tourney_date`, so day-granularity conflict logic would flag normal multi-round progression as a same-day conflict. Audit-only per A10 — no training impact. |
@@ -544,6 +553,43 @@ computed directly and must be resolved by linkage to an already-ingested match.
 
 ---
 
+## K. ATP scraper adapter locks (Day 3 — P6)
+
+Locks surfaced building the ATP website scraper (`adapters/atp_scraper/`). The
+load-bearing problem (the resolution of the long-pending §I1) is **cross-source
+identity**: a scraped match page yields `(tournament, round, two players, match_date,
+start_ts, status)` but no Sackmann `match_num`, so it cannot reproduce Sackmann's
+`source_uid`. Dedup is therefore keyed on the shared `match_id` hash, not on
+`(source, source_uid)`.
+
+| # | Decision | Rationale |
+|---|---|---|
+| K1 | **Cross-source match write uses `match_id` reconciliation, not a naive `(source, source_uid)` upsert.** The adapter calls `matches.get(match_id)` first: (a) row exists with `status='final'` → **skip** (never overwrite Sackmann's authoritative final row); (b) row exists otherwise → `update_live_fields()` updating ONLY the scraper-owned fields `start_ts`, `status`, `match_date_source`; (c) row absent → full `upsert`. | The `matches` PK is `match_id` and there is ALSO `UNIQUE(source, source_uid)`. The scraper and Sackmann describe the same logical match → same `match_id` (C1) but carry different `source` strings → different `(source, source_uid)`. A blind `(source, source_uid)` upsert would INSERT and collide on the `match_id` PRIMARY KEY. Reconciling on `match_id` first merges instead of duplicating, and the final-guard preserves Sackmann's canonical completed row. |
+| K2 | **Scraper `source='atp_scraper'`, `source_uid = f"{slug}:{season}:{round}:{a_slug}:{b_slug}"`** with the two player profile slugs **sorted** for determinism. | Structurally distinct from Sackmann's `{tourney_id}:{match_num}`, so the `UNIQUE(source, source_uid)` constraint never collides cross-source while remaining a stable idempotency key for the scraper's own re-runs. Sorting the slugs makes the key independent of which player the page lists first (mirrors the sorted-pair rule in `match_id`). |
+| K3 | **The scraper hashes `match_date = the tournament-week start date`** (Sackmann's `tourney_date` convention — `sackmann/parser.py` sets `match_date=tourney_date` for every match in an event), NOT the actual calendar day the match is played. The real intraday schedule lives in `start_ts`; `date_precision='day'`; `match_date_source='atp_scraper'` (H3, for `scheduled`/`live`). | `match_id` hashes `match_date` (C1). Sackmann assigns every match in a tournament the single week-start `tourney_date`. If the scraper hashed the real match day, every cross-source `match_id` would diverge and §K1 reconciliation would never fire → a duplicate row per match. Hashing the week-start date makes `match_id` agree; day-level precision is retained in `start_ts`. Residual risk: qualifying-vs-main-draw start drift or slug-convention drift makes `match_id` miss → a separate scraper row is created (graceful, observable via the audit), never a crash. |
+| K4 | **`MatchRepositoryImpl.upsert` reconciles on the `match_id` PRIMARY KEY** (`ON CONFLICT (match_id) DO UPDATE`), with `start_ts` preserved via `COALESCE(excluded.start_ts, matches.start_ts)` so a NULL never clobbers a known intraday timestamp. **Identity fields are NEVER rewritten in `DO UPDATE`**: `source`, `source_uid`, `match_date`, `tournament_id`, `round`, `p1_id`, `p2_id` keep the first writer's values (all necessarily identical on a `match_id` conflict). Only mutable match facts merge in — `status`, `start_ts` (COALESCE), `match_date_source`, and the result fields (`winner_id`, `loser_id`, `score`, `best_of`, `sets_played`, `minutes`, `retired`, `walkover`) so Sackmann can finalize a scraper-created row. `match_id` is 1:1 with `(source, source_uid)` per source, so same-source idempotency is unchanged. | Without PK reconciliation, when Sackmann later publishes a match the scraper already created (same `match_id`, different `source_uid`), Sackmann's plain `(source, source_uid)` upsert would INSERT and raise `IntegrityError` on the PK — silently dead-lettering the authoritative final row forever. Rewriting `source`/`source_uid` in `DO UPDATE` (the original P6 design) was removed in adversarial review: it risked a unique violation on the secondary `(source, source_uid)` index that `ON CONFLICT (match_id)` cannot catch, and churned identity on every merge. The row therefore keeps the originating source; `match_date_source` still records date provenance. |
+| K5 | **Retired-and-replayed same-day match `match_id` collision is accepted for v1.** `core/ids.py` documents that two distinct logical matches between the same two players, in the same round and tournament-week, on the same `match_date` hash to one `match_id`. Under the K4 PK-arbiter upsert they can no longer coexist as two rows — the second write merges into the first. Accepted: the scenario is vanishingly rare in ATP men's singles, and a stats conflict on the merged row is dead-lettered for manual triage. Mitigation (a deterministic collision discriminator in the identity hash) is deferred post-v1. | A pre-existing, documented edge case in `ids.py`; the new arbiter changes its failure mode from "two rows" to "merge + dead-letter on stats conflict", which is observable rather than silently duplicated. Engineering a discriminator now would perturb the identity scheme for an event that essentially never occurs in the modelled tier set. |
+| K6 | **K4 runtime conflict behavior is verified only in Docker-gated integration tests.** `tests/integration/test_repositories.py` proves the real-Postgres semantics (PK merge with no `IntegrityError`, `COALESCE` start_ts preservation, identity retained, final-wins); the fast unit suite asserts compiled-SQL shape only (`ON CONFLICT (match_id)`, COALESCE present, source/source_uid absent from the SET). When Docker/testcontainers is unavailable the integration suite auto-skips, so the highest-risk path is unverified in that environment. Accepted v1 limitation — full verification requires a live Postgres. | SQLAlchemy's `ON CONFLICT … DO UPDATE` + `COALESCE` has no SQLite equivalent, so runtime conflict behavior cannot be exercised in a DB-less unit test. A CI matrix with a mandatory Postgres job for storage/reconciliation changes is the proper fix; deferred to the orchestration/CI phase. |
+
+**Player resolution (slug → Sackmann alias → shadow).** The scraper resolves each player by:
+(1) `players.get_by_source(source='atp_scraper', source_uid=slug)` — the profile slug is the
+scraper's stable identity, so a returning player is matched here regardless of name; (2)
+`player_aliases.get(alias=normalize_player_name(name), source='sackmann')` — reuse the SAME
+canonical `player_id` Sackmann already assigned so `match_id` aligns cross-source (Sackmann's
+I3 collision guard means a name-collided alias is slug-keyed, never resolving to the wrong
+player here); (3) else mint a shadow directly via `player_id_from_source(source='atp_scraper',
+source_uid=slug)` + `players.upsert` + `player_aliases.upsert` (H6 — aliases only, kept
+forever per A9). An `atp_scraper` name→player alias is *written* (guarded against clobbering a
+different `player_id`, I3) but never *looked up* for resolution — the slug (step 1) is the
+authoritative scraper key, so two same-named players with distinct slugs stay distinct. The
+Sackmann resolver's DOB+country/fuzzy tiers are NOT used: scraped match pages carry no
+DOB/country and `PlayerRepository` exposes no list-all to seed fuzzy candidates. This mirrors
+§J1's exact-alias philosophy; misses degrade to a shadow, never a fabricated identity. Known
+v1 limitation: two genuinely distinct ATP players sharing a normalized name can mis-link via
+step 2 (name-only cross-source match) — rare, and consistent with the I3/J1 ambiguity stance.
+
+---
+
 ## 13. Build & run quickstart
 
 ```powershell
@@ -576,8 +622,10 @@ $env:DATABASE_URL = "postgresql+psycopg://user:pass@host:5432/db"
 | 3 (tooling) | [hash TBD] | Dev-tooling only, no pipeline change. Hardened the Stop-hook reviewer (`.claude/hooks/review.py`): opt-in `RUN REVIEW` trailing-sentinel gate, model pinned to `claude-sonnet-4-6`, `max_tokens` 2000→8000, modified-file content read from disk, accurate status banner, `ANTHROPIC_API_KEY` from gitignored `.claude/hooks/.env`. Added 3 project skills (`adversarial-review`, `decisions-update`, `session-summary`) and a `.gitignore` entry for `.claude/hooks/.env`. Unit suite unchanged (457). New tooling decisions F5–F7 (§F). |
 | 3 | [hash TBD] | The Odds API adapter P5 (504 tests, +47): `adapters/odds/{client,parser,adapter}.py` + `MatchRepository.find_by_players_and_date` (Protocol + impl). Current + historical (next_timestamp chain-walk) ingest; token-bucket throttle and the same 429/401/5xx error mapping + API-key hygiene as OWM; event→match linkage via `find_by_players_and_date` over `player_aliases` (exact-alias, source `odds_api`, no shadow players); p1/p2 perspective via `p1_player_id` (never API outcome order); one row per devig method (shin closed-form + proportional; logit never emitted, H9); opening/closing post-pass (§J3); failure-aware watermark where resolution/linkage gaps are skips not failures (I2). New locked decisions J1–J3 (§J). Reconciled stale ~2009 odds-coverage refs to ~2020 (H11) and corrected the spec's inverted Shin direction + arithmetic (real vig≈0.0324, prop 0.7451/0.2549; Shin *expands* the favorite vs proportional). |
 | 3 (post-review) | [hash TBD] | P5 post-review hardening (504→507 tests). Auto-review fixes: added `OddsApiAdapter.backfill_from_config()` so `coverage_start_year` (H11) is actually consumed instead of silently ignored (HIGH); §15.5 market-signal Coverage column corrected `2009+`→`~2020 (H11)` on all 8 rows (MEDIUM). Codex adversarial-review fixes: `_walk_year` now guards a non-advancing/repeated `next_timestamp` (visited-cursor set + strict-advance check) — dead-letter once, count failure, break the year; never loops forever (CRITICAL); a malformed (non-`Mapping`) historical wrapper becomes a counted failure + dead-letter instead of an uncaught `AttributeError` that aborts the run (HIGH); added the Shin (1993) source citation and a `shin_formula_degenerated` structured warning on the proportional fallback. New locked decision J4 (§J): the opening/closing post-pass is non-atomic — accepted v1 limitation (deferred MEDIUM, mirrors O4). |
+| 3 | [hash TBD] | ATP website scraper adapter P6 (507→564 tests, +57): `adapters/atp_scraper/{client,parser,adapter}.py` + `MatchRepository.update_live_fields` (Protocol + impl) + `MatchRepositoryImpl.upsert` re-keyed to the `match_id` PK. Unauthenticated scraper with deterministic UA rotation, token-bucket throttle, 401/403/429/5xx mapping, `utf-8 errors='replace'` decode; pure BeautifulSoup HTML→DTO parsers; cross-source identity via §K1 `match_id` reconciliation (get→skip-final / `update_live_fields` / `upsert`), §K2 sorted-slug `source_uid`, §K3 tournament-week-start `match_date` so `match_id` agrees with Sackmann; slug→Sackmann-alias→shadow player resolution; within-source intraday audit; failure-aware watermark with I2 skip-vs-failure split. New locked decisions K1–K4 (§K). Resolves the long-pending §I1. |
+| 3 (post-review) | [hash TBD] | P6 post-review hardening (564→567 tests). Auto-review HIGH fixes: documented `ingestion.intraday_conflict.enabled` config key; split `_process_match` so `PlayerResolutionError` is a skip not a failure (I2). Codex adversarial-review fixes: zero-parse guard — a tournament page parsing to zero matches is now a counted failure + `ZeroParsedMatches` dead-letter (incomplete watermark), never silent success (CRITICAL); per-row parse isolation — a naive `start_ts` row yields a `None` sentinel so the rest of the page still ingests, instead of aborting the tournament (HIGH); `upsert` `DO UPDATE` no longer rewrites `source`/`source_uid` (identity kept from first writer; avoids secondary-unique collision) (HIGH); intraday-flag write failures decoupled from watermark completion — logged, not counted (MEDIUM). New locked decisions K5 (retired-replayed `match_id` collision accepted v1) and K6 (K4 runtime conflict behavior verified in Docker-gated integration tests only) (§K). |
 
-Next session resumes at **Day 3 — Data Agent build (P6 ATP scraper / P7 orchestrator)**; weather (P4), Sackmann (P3), and odds (P5) source adapters are complete. P6 must first resolve I1 (ATP scraper `source_uid` format → `{tourney_id}:{match_num}`).
+Next session resumes at **Day 3 — Data Agent build (P7 orchestrator)**; all four source adapters — Sackmann (P3), weather (P4), odds (P5), ATP scraper (P6) — are complete. §I1 is resolved (§K1–§K4). P7 wires the adapters into the DataAgent pipeline, enforcing the §J2 order (ATP scraper → Sackmann publish → odds) and the cron/heartbeat orchestration.
 
 ---
 

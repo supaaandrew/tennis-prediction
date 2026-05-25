@@ -44,6 +44,7 @@ data/
 review.md
 review_history.md
 spec.md
+.codex_prompt.txt
 
 # Local hook secrets (Anthropic API key for the Stop-hook reviewer)
 .claude/hooks/.env

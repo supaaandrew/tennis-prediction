@@ -411,22 +411,41 @@ class MatchRepositoryImpl:
             return _orm_to_row(rows[0], MatchRow)
 
     def upsert(self, row: MatchRow) -> MatchRow:
+        """Insert or merge, reconciling on the `match_id` PRIMARY KEY (K4).
+
+        Dedup is keyed on `match_id`, not `(source, source_uid)`: the scraper
+        and Sackmann describe the same logical match with the same `match_id`
+        (C1) but different `source_uid` (K2). Keying the conflict on the PK
+        lets either source write second without an `IntegrityError`. `start_ts`
+        is preserved via COALESCE so a NULL (Sackmann) never clobbers a known
+        scraper timestamp (H3/§15.2).
+
+        Identity fields are NEVER rewritten on conflict: `source`, `source_uid`,
+        `match_date`, `tournament_id`, `round`, `p1_id`, `p2_id`. The row keeps
+        the originating source of whoever inserted it first. Rewriting
+        `source`/`source_uid` here would (a) risk a unique violation on the
+        secondary `(source, source_uid)` index that `ON CONFLICT (match_id)`
+        does not catch, and (b) churn identity on every cross-source merge
+        (Codex HIGH). Only mutable match facts merge in (result, status, dates).
+        """
         if row.start_ts is not None:
             _require_tz_aware(row.start_ts, "start_ts")
         values = _row_to_dict(row, drop_none_for=_SERVER_MANAGED)
         with self._sf() as s:
             stmt = pg_insert(m.Match).values(**values)
             stmt = stmt.on_conflict_do_update(
-                index_elements=["source", "source_uid"],
+                index_elements=["match_id"],
                 set_={
-                    "tournament_id": stmt.excluded.tournament_id,
-                    "round": stmt.excluded.round,
-                    "match_date": stmt.excluded.match_date,
-                    "start_ts": stmt.excluded.start_ts,
+                    # COALESCE: keep an existing start_ts when the incoming
+                    # row carries NULL (scraper owns start_ts; Sackmann NULLs it).
+                    "start_ts": func.coalesce(
+                        stmt.excluded.start_ts, m.Match.start_ts
+                    ),
+                    # Mutable match facts — Sackmann finalizing a scraper-created
+                    # row MUST be able to fill these in (else a final row would
+                    # carry no winner/score). Result fields are not identity.
                     "winner_id": stmt.excluded.winner_id,
                     "loser_id": stmt.excluded.loser_id,
-                    "p1_id": stmt.excluded.p1_id,
-                    "p2_id": stmt.excluded.p2_id,
                     "score": stmt.excluded.score,
                     "best_of": stmt.excluded.best_of,
                     "sets_played": stmt.excluded.sets_played,
@@ -435,17 +454,42 @@ class MatchRepositoryImpl:
                     "walkover": stmt.excluded.walkover,
                     "status": stmt.excluded.status,
                     "match_date_source": stmt.excluded.match_date_source,
+                    # NOT updated (identity / hash inputs, kept from first writer;
+                    # all are necessarily identical on a match_id conflict):
+                    #   source, source_uid, match_date, tournament_id, round,
+                    #   p1_id, p2_id.
                 },
             )
             s.execute(stmt)
             s.flush()
-            o = s.execute(
-                select(m.Match).where(
-                    m.Match.source == row.source,
-                    m.Match.source_uid == row.source_uid,
-                )
-            ).scalar_one()
+            o = s.get(m.Match, row.match_id)
             return _orm_to_row(o, MatchRow)
+
+    def update_live_fields(
+        self,
+        *,
+        match_id: int,
+        start_ts: datetime | None,
+        status: str,
+        match_date_source: str,
+    ) -> None:
+        """Update only the scraper-owned fields on an existing row (K1).
+
+        No-op when `match_id` doesn't exist — logs a warning and returns
+        rather than raising, so the scraper's reconciliation path can fall
+        through to a full upsert without special-casing the race.
+        """
+        if start_ts is not None:
+            _require_tz_aware(start_ts, "start_ts")
+        with self._sf() as s:
+            o = s.get(m.Match, match_id)
+            if o is None:
+                _logger.warning("match_update_live_fields_missing", match_id=match_id)
+                return
+            o.start_ts = start_ts
+            o.status = status
+            o.match_date_source = match_date_source
+            s.flush()
 
     def for_training(
         self, *, season_start: int, season_end: int

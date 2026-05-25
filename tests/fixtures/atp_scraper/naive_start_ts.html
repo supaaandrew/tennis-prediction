@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<body>
+  <table class="scores-results-content">
+    <tbody>
+      <!-- Row 1: naive start_ts (no Z/offset) → per-row parse error, skipped. -->
+      <tr class="match" data-round="QF">
+        <td class="day-table-time" data-start-ts="2026-07-08T11:00:00"></td>
+        <td class="day-table-status" data-status="scheduled"></td>
+        <td class="day-table-name">
+          <a href="/en/players/alpha-one/a1/overview">Alpha One</a>
+        </td>
+        <td class="day-table-name">
+          <a href="/en/players/beta-two/b2/overview">Beta Two</a>
+        </td>
+      </tr>
+      <!-- Row 2: valid tz-aware start_ts → must still be processed. -->
+      <tr class="match" data-round="QF">
+        <td class="day-table-time" data-start-ts="2026-07-08T13:00:00Z"></td>
+        <td class="day-table-status" data-status="scheduled"></td>
+        <td class="day-table-name">
+          <a href="/en/players/gamma-three/g3/overview">Gamma Three</a>
+        </td>
+        <td class="day-table-name">
+          <a href="/en/players/delta-four/d4/overview">Delta Four</a>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>

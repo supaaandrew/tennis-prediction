@@ -9,13 +9,12 @@ Read these before generating the prompt:
 - spec.md (what this session was asked to build)
 - Every file touched in the diff
 
-Generate and print a tailored Codex adversarial review prompt.
+Generate a tailored Codex adversarial review prompt and write it to
+.codex_prompt.txt in the project root (do NOT print it for copy-paste).
 Do NOT invoke /codex:adversarial-review yourself.
-Print the prompt so the user can review it, then copy-paste
-into /codex:adversarial-review manually.
 
 Fill in SESSION-SPECIFIC CHECKS based on what the diff
-actually contains. Then print this full prompt:
+actually contains. Build this full prompt:
 
 ---
 Codex adversarial review. Target: working tree diff.
@@ -120,5 +119,13 @@ Summary table:
   TOTAL: N
 ---
 
-After printing the prompt say:
-"Copy the prompt above and paste into /codex:adversarial-review"
+After building the prompt, write it to .codex_prompt.txt:
+
+    import pathlib
+    pathlib.Path('.codex_prompt.txt').write_text(prompt)
+
+Then output exactly:
+"Prompt written to .codex_prompt.txt
+
+Run Codex with:
+/codex:adversarial-review \"$(cat .codex_prompt.txt)\""

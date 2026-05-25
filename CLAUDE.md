@@ -24,8 +24,8 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ Hook infrastructure  CLAUDE.md, stop hook, review.py (opt-in RUN REVIEW gate, F5-F7)
 ✅ P4                OWM weather adapter (client/parser/adapter), 457 tests
 ✅ P5                Odds API adapter (client/parser/adapter) + match linkage, 507 tests (post-review)
-⬜ P6                ATP scraper adapter  ← resolve I1 source_uid format first
-⬜ P7                DataAgent orchestrator
+✅ P6                ATP scraper adapter (client/parser/adapter) + match_id reconciliation, 567 tests (post-review)
+⬜ P7                DataAgent orchestrator  ← wire 4 adapters in §J2 order (scraper→Sackmann→odds)
 ⬜ Research Agent    features/, point_in_time.py, Elo extractor
 ⬜ Modeling Agent    stacking ensemble, calibration, edge
 ⬜ Briefing Agent    Claude API, RAG, email
@@ -107,10 +107,18 @@ Match src/tennis/core/ style exactly:
 ---
 
 ## Decisions pending (address before building)
-- I1: ATP scraper source_uid format must match Sackmann's
-  `{tourney_id}:{match_num}` format for cross-source dedup
-  to work. Resolve before P6 (ATP scraper adapter) — see
-  DECISIONS.md §I1.
+- (none open) — I1 was RESOLVED in P6 by §K1–§K4: cross-source
+  dedup is keyed on the shared `match_id` PK (not `source_uid`),
+  the scraper uses a distinct `source_uid` format (§K2), and it
+  hashes the tournament-week start date (§K3) so `match_id`
+  agrees with Sackmann. See DECISIONS.md §K.
+
+## Carry-forward for P7 (not blocking, but verify)
+- The ATP scraper's HTML selectors (`adapters/atp_scraper/parser.py`)
+  are validated only against authored fixtures, NOT live atptour.com
+  HTML. Validate against a real page before trusting ingest. The
+  §K6 zero-parse guard turns silent HTML drift into a loud failure —
+  wire it to alerting in P7.
 
 ---
 

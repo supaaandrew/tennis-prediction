@@ -539,6 +539,106 @@ class TestFindByPlayersAndDate:
 
 
 # ---------------------------------------------------------------------------
+# 5c. MatchRepository.upsert — K4 reconciles on the match_id PK so a
+#     cross-source second write merges instead of colliding, and never lets a
+#     NULL start_ts clobber a known one. SQL shape is verified here; the full
+#     merge behaviour against real Postgres lives in the integration suite.
+# ---------------------------------------------------------------------------
+def _match_row(**overrides: Any):
+    from tennis.storage.postgres.rows import MatchRow
+
+    base = dict(
+        match_id=777, tournament_id=7, round="QF", match_date=date(2024, 6, 1),
+        p1_id=10, p2_id=20, status="scheduled", source="atp_scraper",
+        source_uid="wimbledon:2024:QF:a:b",
+    )
+    base.update(overrides)
+    return MatchRow(**base)  # type: ignore[arg-type]
+
+
+class TestMatchUpsertReconciliation:
+    def _repo(self) -> tuple[MatchRepositoryImpl, MagicMock]:
+        s = MagicMock()
+        return MatchRepositoryImpl(_make_mock_factory(s)), s
+
+    def test_upsert_conflicts_on_match_id_pk(self) -> None:
+        repo, s = self._repo()
+        repo.upsert(_match_row())
+        stmt = s.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        assert "on conflict" in compiled
+        # PK arbiter, not the (source, source_uid) unique index.
+        assert "(match_id)" in compiled
+
+    def test_upsert_coalesces_start_ts(self) -> None:
+        repo, s = self._repo()
+        repo.upsert(_match_row())
+        stmt = s.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        # A NULL incoming start_ts must not overwrite an existing one.
+        assert "coalesce" in compiled
+
+    def test_upsert_does_not_rewrite_source_identity(self) -> None:
+        # Identity fields must NEVER change on conflict (Codex HIGH): the DO
+        # UPDATE SET must not reassign source / source_uid, but result/status
+        # fields stay mutable so Sackmann can finalize a scraper-created row.
+        repo, s = self._repo()
+        repo.upsert(_match_row())
+        stmt = s.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        assert "source_uid = excluded.source_uid" not in compiled
+        assert "source = excluded.source" not in compiled
+        assert "status = excluded.status" in compiled
+        assert "winner_id = excluded.winner_id" in compiled
+
+    def test_upsert_rejects_naive_start_ts(self) -> None:
+        repo, _ = self._repo()
+        with pytest.raises(ValueError, match="start_ts"):
+            repo.upsert(_match_row(start_ts=datetime(2024, 6, 1, 13, 0)))
+
+
+class TestUpdateLiveFields:
+    def _repo(self, existing: Any) -> tuple[MatchRepositoryImpl, MagicMock]:
+        s = MagicMock()
+        s.get.return_value = existing
+        return MatchRepositoryImpl(_make_mock_factory(s)), s
+
+    def test_updates_only_scraper_owned_fields(self) -> None:
+        orm = MagicMock()
+        repo, s = self._repo(orm)
+        ts = datetime(2024, 6, 1, 13, 30, tzinfo=UTC)
+        repo.update_live_fields(
+            match_id=777, start_ts=ts, status="live", match_date_source="atp_scraper",
+        )
+        assert orm.start_ts == ts
+        assert orm.status == "live"
+        assert orm.match_date_source == "atp_scraper"
+        s.flush.assert_called_once()
+
+    def test_noop_and_warns_when_match_missing(self) -> None:
+        from structlog.testing import capture_logs
+
+        repo, s = self._repo(None)
+        with capture_logs() as logs:
+            repo.update_live_fields(
+                match_id=404, start_ts=None, status="scheduled",
+                match_date_source="atp_scraper",
+            )
+        assert any(
+            e.get("event") == "match_update_live_fields_missing" for e in logs
+        )
+        s.flush.assert_not_called()
+
+    def test_rejects_naive_start_ts(self) -> None:
+        repo, _ = self._repo(MagicMock())
+        with pytest.raises(ValueError, match="start_ts"):
+            repo.update_live_fields(
+                match_id=777, start_ts=datetime(2024, 6, 1, 13, 0),
+                status="live", match_date_source="atp_scraper",
+            )
+
+
+# ---------------------------------------------------------------------------
 # 6. Helpers
 # ---------------------------------------------------------------------------
 class TestHelpers:

@@ -546,6 +546,121 @@ class TestUpsertIdempotency:
             # Final write wins.
             assert rows[0].status == "final"
 
+    def test_cross_source_upsert_merges_on_match_id_pk(self, session_factory: Any) -> None:
+        """K4: a scraper row then a Sackmann row with the SAME match_id but a
+        DIFFERENT source_uid must merge on the PK (no IntegrityError), promote
+        to final, and PRESERVE the scraper's start_ts via COALESCE. Identity
+        (source/source_uid) is kept from the first writer, not rewritten."""
+        from sqlalchemy import select
+
+        from tennis.storage.postgres import models as m
+        from tennis.storage.postgres.impl import (
+            MatchRepositoryImpl,
+            PlayerRepositoryImpl,
+            TournamentRepositoryImpl,
+            VenueRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import MatchRow
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches = MatchRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="MergeCity", country="MG1")
+        t = _seed_tournament(tournaments, slug="merge-t", venue_id=v.venue_id)
+        p1 = _seed_player(players, source_uid="mergeA")
+        p2 = _seed_player(players, source_uid="mergeB")
+
+        mid = compute_match_id(
+            tournament_id=t.tournament_id, round="QF",
+            player_a=p1.player_id, player_b=p2.player_id,
+            match_date=date(2026, 8, 1),
+        )
+        scraper_ts = datetime(2026, 8, 1, 13, 30, tzinfo=UTC)
+
+        # 1. Scraper writes the upcoming match first (distinct source_uid, K2).
+        matches.upsert(MatchRow(
+            match_id=mid, tournament_id=t.tournament_id, round="QF",
+            match_date=date(2026, 8, 1), p1_id=p1.player_id, p2_id=p2.player_id,
+            status="scheduled", source="atp_scraper",
+            source_uid="merge-t:2026:QF:a:b", start_ts=scraper_ts,
+            match_date_source="atp_scraper",
+        ))
+
+        # 2. Sackmann later publishes the SAME match: same match_id, different
+        #    source_uid, status=final, start_ts NULL. Must NOT raise.
+        merged = matches.upsert(MatchRow(
+            match_id=mid, tournament_id=t.tournament_id, round="QF",
+            match_date=date(2026, 8, 1), p1_id=p1.player_id, p2_id=p2.player_id,
+            status="final", source="sackmann", source_uid="2026-540:1",
+            start_ts=None, match_date_source="sackmann",
+        ))
+
+        assert merged.status == "final"          # final write wins (status mutable)
+        assert merged.source == "atp_scraper"     # identity kept from FIRST writer (FIX3)
+        assert merged.start_ts == scraper_ts      # COALESCE preserved start_ts
+
+        with session_factory() as s:
+            rows = s.execute(
+                select(m.Match).where(m.Match.match_id == mid)
+            ).scalars().all()
+            assert len(rows) == 1                  # merged, not duplicated
+
+    def test_update_live_fields_updates_only_scraper_owned(
+        self, session_factory: Any
+    ) -> None:
+        """K1: update_live_fields touches only start_ts/status/match_date_source
+        and no-ops (no raise, no insert) when the match_id is absent."""
+        from sqlalchemy import select
+
+        from tennis.storage.postgres import models as m
+        from tennis.storage.postgres.impl import (
+            MatchRepositoryImpl,
+            PlayerRepositoryImpl,
+            TournamentRepositoryImpl,
+            VenueRepositoryImpl,
+        )
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches = MatchRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="LiveCity", country="LV1")
+        t = _seed_tournament(tournaments, slug="live-t", venue_id=v.venue_id)
+        p1 = _seed_player(players, source_uid="liveA")
+        p2 = _seed_player(players, source_uid="liveB")
+        seeded = _seed_match(
+            matches, tournament_id=t.tournament_id,
+            p1_id=p1.player_id, p2_id=p2.player_id,
+            round="SF", match_date=date(2026, 8, 3),
+            status="scheduled", source_uid="live-uid",
+        )
+        ts = datetime(2026, 8, 3, 18, 0, tzinfo=UTC)
+
+        matches.update_live_fields(
+            match_id=seeded.match_id, start_ts=ts, status="live",
+            match_date_source="atp_scraper",
+        )
+        after = matches.get(seeded.match_id)
+        assert after is not None
+        assert after.status == "live"
+        assert after.start_ts == ts
+        assert after.match_date_source == "atp_scraper"
+        assert after.round == "SF"          # untouched
+        assert after.p1_id == seeded.p1_id  # untouched
+
+        # Absent match_id → no-op, no row created.
+        matches.update_live_fields(
+            match_id=424242, start_ts=ts, status="live",
+            match_date_source="atp_scraper",
+        )
+        with session_factory() as s:
+            assert s.execute(
+                select(m.Match).where(m.Match.match_id == 424242)
+            ).scalar_one_or_none() is None
+
     def test_odds_snapshot_natural_key_dedup(self, session_factory: Any) -> None:
         from sqlalchemy import select
 

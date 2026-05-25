@@ -103,7 +103,27 @@ class MatchRepository(Protocol):
 
     def get(self, match_id: int) -> MatchRow | None: ...
     def get_by_source(self, *, source: str, source_uid: str) -> MatchRow | None: ...
-    def upsert(self, row: MatchRow) -> MatchRow: ...
+    def upsert(self, row: MatchRow) -> MatchRow:
+        """Insert or merge a match, reconciling on the `match_id` PRIMARY KEY
+        (K4) so a cross-source second write merges instead of colliding on the
+        PK. `start_ts` is preserved via COALESCE — a NULL never clobbers a
+        known intraday timestamp (H3/§15.2: `start_ts` is scraper-owned and
+        Sackmann writes it NULL)."""
+        ...
+
+    def update_live_fields(
+        self,
+        *,
+        match_id: int,
+        start_ts: datetime | None,
+        status: str,
+        match_date_source: str,
+    ) -> None:
+        """Update ONLY the scraper-owned fields (`start_ts`, `status`,
+        `match_date_source`) on an existing row, used by the ATP scraper's
+        §K1 reconciliation path. No-op if `match_id` doesn't exist — log a
+        warning, never raise."""
+        ...
 
     def find_by_players_and_date(
         self,

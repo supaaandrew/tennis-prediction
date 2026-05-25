@@ -452,3 +452,78 @@ v1 limitation, same class as O4; moved here from a mis-filed §O6).
 Carry forward: re-verify any pinned numeric/spec claims (the P5 spec's de-vig
 numbers + Shin direction were wrong); guard every cursor-walk loop for
 termination; validate upstream payload shape before `.get()`.
+
+---
+
+## Session 2026-05-24 — P6 ATP website scraper adapter
+
+**Prompt:** Build the P6 ATP scraper (`adapters/atp_scraper/`) mirroring odds/owm
+— lock the cross-source identity decision (§K) first, add
+`MatchRepository.update_live_fields`, then client/parser/adapter, TDD. Resolve
+the long-pending §I1.
+
+**Shipped:**
+- `src/tennis/adapters/atp_scraper/{__init__,client,parser,adapter}.py` (new).
+- `MatchRepository.update_live_fields` (Protocol + `MatchRepositoryImpl`):
+  updates only scraper-owned `start_ts`/`status`/`match_date_source`; no-op +
+  warn on missing `match_id`.
+- `MatchRepositoryImpl.upsert` re-keyed from `ON CONFLICT (source, source_uid)`
+  to **`ON CONFLICT (match_id)`** (the PK) with `COALESCE(excluded.start_ts,
+  matches.start_ts)`, so a cross-source second write merges instead of an
+  `IntegrityError` (§K4).
+- `tests/fixtures/atp_scraper/*.html` (new — first `tests/fixtures/` dir) loaded
+  from disk by a per-package `conftest.py`.
+- DECISIONS.md: new **§K (K1–K4)**; §I1 marked resolved; §5 topology + test
+  counts; §14 commit row. CLAUDE.md status → P6 ✅.
+- Tests: **507 → 564** (+57: 7 repo `update_live_fields`/`upsert`-reconcile +
+  13 client + 14 parser + 23 adapter; plus 2 Docker-gated integration tests for
+  the §K4 merge). Full unit suite green, no Docker.
+
+**Patterns/decisions locked this session (the core difficulty was cross-source
+identity, exactly as match-linkage was for P5):**
+- **§K1** `match_id` reconciliation (scraper-side): `matches.get(match_id)` →
+  skip if existing `final` / else `update_live_fields` / else full `upsert`.
+- **§K2** scraper `source_uid = f"{slug}:{season}:{round}:{a_slug}:{b_slug}"`,
+  slugs sorted — structurally distinct from Sackmann's so the secondary UNIQUE
+  never collides cross-source.
+- **§K3** scraper hashes `match_date = tournament-week start date` (Sackmann's
+  `tourney_date` convention), NOT the real match day — otherwise `match_id`
+  diverges and §K1 never fires. The real schedule lives in `start_ts`.
+- **§K4** `upsert` reconciles on the `match_id` PK (the repository-layer fix,
+  chosen by the user over document-and-defer).
+- Player resolution: slug → Sackmann alias → shadow (DOB/fuzzy tiers infeasible
+  from scraped pages; mirrors §J1 exact-alias philosophy).
+
+**Codex findings (adversarial review):** CRITICAL — zero-parse silent success
+(empty parse marked the watermark `complete`, masking HTML drift) (**fixed**:
+zero valid matches → counted failure + `ZeroParsedMatches` dead-letter +
+incomplete watermark); HIGH — one naive `start_ts` aborted the whole tournament
+page (**fixed**: per-row isolation; the parser yields a `None` sentinel and the
+adapter skips just that row); HIGH — `upsert` `DO UPDATE` rewrote
+`source`/`source_uid`, risking a secondary-unique collision + identity churn
+(**fixed**: identity fields never rewritten; result/status fields stay mutable
+so Sackmann can still finalize); MEDIUM — audit-only `mark_intraday_conflict`
+failures blocked watermark completion (**fixed**: logged, not counted); MEDIUM —
+§K4 runtime behavior only covered by Docker-gated integration tests
+(**deferred**, §K6). Auto-review HIGH fixes earlier in the session: documented
+the `intraday_conflict.enabled` config key; `PlayerResolutionError` is a skip
+not a failure (I2). Post-review: **564 → 567**.
+
+**Self-found / flagged (carry-forward honesty per the P5 lesson):** the parser
+selectors are **authored fixtures, not a live atptour.com snapshot** — the
+`data-*` attribute shape almost certainly does not match real ATP HTML and MUST
+be validated against a live page before production (this is the dominant prod
+risk; §K6 + the zero-parse guard are the safety nets). `bs4`/`ruff`/`mypy` were
+not installed in `.venv`; installed `beautifulsoup4` (declared dep) to run —
+`ruff`/`mypy` still absent (could not lint/type-check). Suite hovers at ~5.2s,
+marginally over the <5s soft budget.
+
+**New locked decisions:** K1–K4 (build), K5 (retired-replayed same-day
+`match_id` collision accepted v1 — merge + dead-letter on stats conflict), K6
+(§K4 runtime conflict behavior verified in Docker-gated integration only).
+
+**Next:** P7 — DataAgent orchestrator. Wire the four source adapters into the
+daily pipeline enforcing the §J2 order (ATP scraper → Sackmann publish → odds),
+with cron + heartbeat + dead-letter. Carry forward: validate the scraper's real
+ATP HTML selectors before trusting ingest; the zero-parse guard turns silent
+drift into a loud failure — wire it to alerting in P7.
