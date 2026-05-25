@@ -8,8 +8,8 @@ testing and dependency swapping trivial.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
@@ -78,6 +78,14 @@ class AgentResult:
     errors: tuple[AgentError, ...] = ()
 
 
+def _noop_heartbeat() -> None:
+    """Default `AgentContext.heartbeat`: a no-op. The orchestrator overrides
+    this per-run with a closure that touches `pipeline_runs.last_heartbeat_at`;
+    agents invoked outside a pipeline (tests, ad-hoc runs) get a safe no-op.
+    """
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class AgentContext:
     """Everything an agent needs at runtime. Passed by the orchestrator.
@@ -92,6 +100,12 @@ class AgentContext:
     db: Any             # SessionFactory protocol (defined in storage/postgres)
     clock: Clock
     logger: Any         # structlog BoundLogger
+    # Per-run heartbeat emitter. `run_id`/`attempt` only exist once the run has
+    # started, so the orchestrator builds this closure in `run_once()` and
+    # threads it here rather than into the (once-built) agent constructor.
+    # The agent calls `ctx.heartbeat()` between long steps; it reads the *real*
+    # clock (not `clock` above, which is pinned to `as_of`).
+    heartbeat: Callable[[], None] = field(default=_noop_heartbeat)
 
     def __post_init__(self) -> None:
         # as_of must be tz-aware — mirrors the UTC-only contract on

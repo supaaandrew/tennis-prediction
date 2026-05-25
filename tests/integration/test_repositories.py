@@ -717,3 +717,41 @@ class TestUpsertIdempotency:
             ).scalars().all()
             assert len(rows) == 1
             assert float(rows[0].p1_decimal) == 1.85
+
+
+# ---------------------------------------------------------------------------
+# VenueRepository.list_all() — supports the DataAgent OWM venue enumeration (§L5)
+# ---------------------------------------------------------------------------
+class TestVenueListAll:
+    def test_returns_all_venues_ordered_by_id(self, session_factory: Any) -> None:
+        from tennis.storage.postgres.impl import VenueRepositoryImpl
+        from tennis.storage.postgres.rows import VenueRow
+
+        venues = VenueRepositoryImpl(session_factory)
+
+        # One venue WITH coordinates, one WITHOUT — mirrors the v1 geocoding gap.
+        with_coords = venues.upsert(VenueRow(
+            venue_id=compute_venue_id(city="ListAllCoords", country_code="LA1"),
+            city="ListAllCoords", country_code="LA1",
+            latitude=51.5, longitude=-0.12,
+        ))
+        without_coords = venues.upsert(VenueRow(
+            venue_id=compute_venue_id(city="ListAllNoCoords", country_code="LA2"),
+            city="ListAllNoCoords", country_code="LA2",
+        ))
+
+        rows = list(venues.list_all())
+        ids = [r.venue_id for r in rows]
+
+        # Both seeded venues present, ordered by venue_id (deterministic).
+        assert with_coords.venue_id in ids
+        assert without_coords.venue_id in ids
+        assert ids == sorted(ids)
+
+        # The DataAgent's coord filter (§L5) keeps only lat/lon-bearing venues.
+        coord_ids = [
+            r.venue_id for r in rows
+            if r.latitude is not None and r.longitude is not None
+        ]
+        assert with_coords.venue_id in coord_ids
+        assert without_coords.venue_id not in coord_ids

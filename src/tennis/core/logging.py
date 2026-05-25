@@ -14,6 +14,7 @@ logging a secret.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -25,10 +26,46 @@ from structlog.stdlib import BoundLogger
 __all__ = [
     "configure_logging",
     "get_logger",
+    "redact_text",
     "bind_contextvars",
     "clear_contextvars",
     "unbind_contextvars",
 ]
+
+
+# Credential-bearing substrings to mask inside free text (exception messages,
+# repr() output) before it is logged or persisted. The structlog redactor below
+# masks event-dict values by *key name*; it cannot see a secret embedded inside
+# a string value (e.g. an API key in a URL inside an exception message), which
+# is exactly the leak path `redact_text` closes.
+_REDACT_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # key=value / key: value where the key name looks credential-bearing
+    (
+        re.compile(
+            r"(?i)(api[_-]?key|apikey|access[_-]?key|secret|token|password|passwd|pwd|auth)"
+            r"(['\"]?\s*[=:]\s*['\"]?)"
+            r"([^\s'\"&]+)"
+        ),
+        r"\1\2***",
+    ),
+    # Bearer tokens in Authorization-style strings
+    (re.compile(r"(?i)(bearer\s+)(\S+)"), r"\1***"),
+    # Credentials embedded in a URL userinfo: scheme://user:pass@host
+    (re.compile(r"(://[^:/\s@]+:)([^@\s]+)(@)"), r"\1***\3"),
+)
+
+
+def redact_text(text: str) -> str:
+    """Mask credential-like substrings in free text before logging/persisting.
+
+    Complements the key-based structlog redactor for the cases where untrusted
+    text — exception messages, ``repr()`` output — is stored or logged as a
+    value (e.g. an adapter HTTP error carrying ``?apiKey=...`` in its message).
+    """
+    out = text
+    for pattern, repl in _REDACT_TEXT_PATTERNS:
+        out = pattern.sub(repl, out)
+    return out
 
 
 def _make_redactor(redact_keys: Sequence[str]) -> Any:

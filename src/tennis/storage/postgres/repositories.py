@@ -23,6 +23,7 @@ Locked decisions baked into the interfaces (these are NOT optional knobs):
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from contextlib import AbstractContextManager
 from datetime import date, datetime
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -77,6 +78,11 @@ class VenueRepository(Protocol):
     def get_by_city_country(
         self, *, city: str, country_code: str
     ) -> VenueRow | None: ...
+    def list_all(self) -> Sequence[VenueRow]:
+        """All venues ordered by `venue_id`. The DataAgent filters these for
+        coordinate-bearing rows to feed the OWM adapter (§L5); in v1 the
+        filtered list is empty until a geocoding pass populates lat/lon."""
+        ...
     def upsert(self, row: VenueRow) -> VenueRow: ...
 
 
@@ -318,6 +324,17 @@ class PipelineRunRepository(Protocol):
     def prior_statuses(self, *, run_id: UUID) -> dict[str, str]:
         """Map of agent name → latest terminal status for this run_id.
         Fed to `Precondition.check` in `core.lineage`."""
+        ...
+
+    def advisory_lock(self, *, key: int) -> AbstractContextManager[bool]:
+        """Cluster-wide Postgres session advisory lock for singleton execution.
+
+        The returned context manager yields ``True`` if the lock was acquired
+        (the caller may proceed) or ``False`` if another session already holds
+        it (the caller must abort). The lock is held for the duration of the
+        context and released on exit. DailyPipeline takes this before sweeping
+        orphans so two overlapping invocations cannot reap each other's live
+        `running` rows."""
         ...
 
 

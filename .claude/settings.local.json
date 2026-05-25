@@ -56,7 +56,9 @@
       "Bash(grep -c '^---$' review_history.md)",
       "Bash(awk 'BEGIN{RS=\"\\\\n---\\\\n\"} {a[NR]=$0} END{for\\(i=NR-4;i<=NR;i++\\) if\\(a[i]!=\"\"\\){print \"===== ENTRY\",i,\"=====\"; print a[i]; print \"\"}}' review_history.md)",
       "Bash(python -c \"import py_compile; py_compile.compile\\('.claude/hooks/review.py', doraise=True\\); print\\('review.py compiles OK'\\)\")",
-      "Bash(Get-ChildItem *)"
+      "Bash(Get-ChildItem *)",
+      "Bash(Select-Object -First 50 FullName)",
+      "Bash(python -)"
     ]
   }
 }

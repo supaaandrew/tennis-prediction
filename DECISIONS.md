@@ -139,7 +139,10 @@ Tennis_Prediction_Bot/
 ├── prompts.md                 # session build log
 ├── config/
 │   ├── config.yaml            # single source of all knobs (no secrets)
-│   └── player_overrides.yaml  # manual alias overrides (empty stub)
+│   ├── player_overrides.yaml  # manual alias overrides (empty stub)
+│   └── venue_coords.yaml      # P7 — static reviewed venue coords (§L11), 58 entries
+├── scripts/
+│   └── geocode_venues.py      # P7 — one-shot GeoPy/Nominatim generator for venue_coords.yaml
 ├── ops/alembic.ini
 ├── migrations/
 │   ├── env.py, script.py.mako
@@ -186,12 +189,18 @@ Tennis_Prediction_Bot/
 │   │       └── adapter.py     # orchestration, §K1 match_id merge, shadow resolution
 │   └── agents/
 │       ├── __init__.py
+│       ├── data/              # P7 — DataAgent (daily ingest orchestrator)
+│       │   ├── __init__.py
+│       │   └── agent.py       # DataAgent(Agent): §J2 order, fault isolation, §L11 venue geocode pass, §L
+│       ├── orchestrator/      # P7 — pipeline_runs lifecycle owner
+│       │   ├── __init__.py
+│       │   └── pipeline.py    # DailyPipeline.run_once(): sweep→run→heartbeat→status
 │       └── research/
 │           ├── __init__.py
 │           └── validator.py   # FeatureMatrixValidator (orchestrator gate)
 └── tests/
     ├── conftest.py            # frozen_clock, repo_root, config_path
-    ├── unit/                  # 504 tests, all green locally
+    ├── unit/                  # 595 tests, all green locally
     │   ├── core/{test_clock,test_ids,test_normalize_player_name,test_errors,
     │   │       test_logging,test_config,test_di,test_lineage,test_contracts}.py
     │   ├── storage/{test_rows,test_repositories,test_session,test_impl}.py
@@ -199,7 +208,10 @@ Tennis_Prediction_Bot/
     │   ├── adapters/owm/{test_client,test_parser,test_adapter}.py         # 42
     │   ├── adapters/odds/{test_client,test_parser,test_adapter}.py        # 43
     │   ├── adapters/atp_scraper/{conftest,test_client,test_parser,test_adapter}.py # 53 (P6)
-    │   └── agents/research/test_validator.py
+    │   └── agents/
+    │       ├── data/test_agent.py            # 16 (P7 — DataAgent control flow + §L11 geocode pass)
+    │       ├── orchestrator/test_pipeline.py # 10 (P7 — DailyPipeline lifecycle)
+    │       └── research/test_validator.py
     ├── fixtures/
     │   └── atp_scraper/        # P6 — real-shape ATP HTML fragments for parser tests
     │       └── {index,tournament_matches,naive_start_ts,intraday_conflict}.html
@@ -209,10 +221,12 @@ Tennis_Prediction_Bot/
         └── test_repositories.py
 ```
 
-Modules not yet built (Day 3+ work):
-`agents/{data,modeling,briefing}/`, `features/`, `models/`,
-`adapters/atp_scraper/`, `storage/qdrant/`,
-`orchestrator/`, `cli.py`.
+Modules not yet built (Day 4+ work):
+`agents/{modeling,briefing}/`, `features/`, `models/`,
+`storage/qdrant/`, `cli.py`. The P7 wiring (adapter-factory construction
+in the DI container + cron shim invoking `DailyPipeline.run_once()`) is a thin
+deferred glue layer — the `run_once()` entrypoint exists; scheduler wiring is
+out of P7 scope.
 
 ---
 
@@ -590,6 +604,31 @@ step 2 (name-only cross-source match) — rare, and consistent with the I3/J1 am
 
 ---
 
+## L. DataAgent orchestrator locks (Day 4 — P7)
+
+Locks surfaced building the first agent: `DataAgent` (`agents/data/`) wires the four
+committed source adapters into one daily ingest, and `DailyPipeline`
+(`agents/orchestrator/`) owns the `pipeline_runs` lifecycle (orphan sweep → run row →
+heartbeat → terminal status). The load-bearing tension is **fault isolation**: one
+adapter failing must neither abort the others nor be silently reported as success
+(carrying forward the P6 "a clean run that did nothing is a failure signal" lesson).
+
+| # | Decision | Rationale |
+|---|---|---|
+| L1 | **Intra-DataAgent step order is the §J2 data-write order: ATP scraper → Sackmann ingest → Odds → Weather, sequential.** Staleness is a *gate*, not a write step, so `sackmann.check_staleness()` runs as a pre-flight *before* the scraper (see §L3). v1 is single-writer sequential (per §J4/§O4); no intra-agent concurrency. | Odds linkage (`find_by_players_and_date`, §J2) needs match rows to already exist, so the scraper (the source of upcoming/live rows + `start_ts`) must run before Odds, else every event dead-letters as unlinked. Weather runs last because it depends on venues that tournament ingestion populates. Running staleness as a pre-flight reconciles §J2 (scraper-first) with §L3 (staleness halts everything) — the check is not itself a write. |
+| L2 | **Per-adapter fault isolation → run status mapping.** Each adapter step is wrapped so one adapter's exception is captured as an `AgentError` and the others still run. `DataAgent` aggregates per-adapter *effective-completeness* into `AgentResult.ok`. `DailyPipeline` maps: all adapters effective-complete + no `AgentError` → `'succeeded'`; any `failures>0` / not-effective-complete / non-fatal `AgentError` → `'partial'`; `SackmannStalenessError` or a non-staleness pre-flight error → `'failed'`. "All four adapters failed mid-run" stays `'partial'` (a known corner — severity is surfaced by the Monitor agent, not the run status). | `'partial'` means something ran and something failed; `'failed'` means nothing meaningful ran. The primary failure signal is each adapter's `result.complete` (`failures==0`), NOT "did it throw" — every adapter already swallows transport/storage faults internally and reports via its result object (a down Odds API throws nothing; only `complete=False` reveals it). The per-step try/except is a backstop for *unexpected* bugs. Isolating at the adapter level (not the row/tournament level — the P6 over-abort mistake) keeps one bad feed from dropping the rest. |
+| L3 | **`SackmannStalenessError` (and any other pre-flight error) halts immediately.** The pre-flight calls `sackmann.check_staleness()` before any adapter. `SackmannStalenessError` → `AgentError(code='staleness_halt')`; any other pre-flight exception (e.g. a missing mirror dir from `reader.dir_mtime()`) → `AgentError(code='preflight_error')`. Both → `'failed'`, and **no** other adapter is invoked. This is the only case `DataAgent` returns `ok=False` without attempting the other adapters. | C5 says stale Sackmann data must halt the pipeline rather than feed the model. A non-staleness pre-flight failure (mirror unreadable) is equally disqualifying and must not silently degrade to `'partial'` as if an adapter merely had row failures — nothing ran, so the status is `'failed'`. |
+| L4 | **One `as_of` is captured once and threaded to every adapter via a pinned clock.** `DailyPipeline.run_once()` captures `as_of = real_clock.now()` once, builds `FrozenClock(as_of)`, and sets it as `AgentContext.clock`. `DataAgent` constructs each adapter with `ctx.clock` (the pinned instant); every adapter's internal `self._clock.now()` therefore returns the single `as_of`. No adapter takes an `as_of`/`fetch_ts` parameter — the single-instant contract is enforced purely by clock injection. The **real** clock never enters `AgentContext`; it lives only on `DailyPipeline` for run-lifecycle, orphan timing, and the heartbeat closure (§L7). | A single `as_of` makes a run reproducible and PIT-correct: Sackmann staleness age, OWM `fetch_ts`, Odds' "refuse snapshots after now" filter, and the scraper lookback-window end all reference the same instant. Heartbeats, by contrast, MUST use the real clock — a frozen heartbeat timestamp would make a live multi-hour run look instantly orphaned. Keeping the real clock off `AgentContext` is what guarantees adapters can't accidentally observe wall-clock drift. |
+| L5 | **Weather venue-coords gap (resolved): empty venue set is `'succeeded'` + a loud warning, not a downgrade.** `DataAgent` enumerates venues via the new `VenueRepository.list_all()` and filters to coord-bearing rows (`latitude`/`longitude` non-null), passing them to `owm.fetch_forecasts(venue_ids)` (forward-looking only; `backfill` is a separate one-shot job). In v1 no venue carries coordinates → the filtered list is `[]` → `owm` returns an all-zeros result (`complete=True`); `DataAgent` emits a structured `owm_no_venues_v1_expected` warning and the run is NOT downgraded. The P6 "did-nothing" downgrade to `'partial'` applies ONLY when coord-bearing venues exist (`venues_processed>0`) yet `observations_upserted==0`, or `failures>0`. | An empty venue set is the *expected, correct* v1 state (geocoding is a future pass), not a silent failure — so it must not pin every run to `'partial'`, which would strip the status of all signal. The P6 lesson ("zero rows where rows were expected = failure") keys on *expectation*: with zero coord-bearing venues, zero observations is the correct output. The same `list_all()` + filter activates the real fetch path with **no DataAgent code change** the moment `venues.latitude/longitude` are populated. Surface the v1 gap via a Monitor alert on the warning, not via run status. |
+| L6 | **Daily Sackmann processes the full configured `history_backfill_season_range` via the watermark-gated loop** (`check_pin_commit` → `ingest_players` → `ingest_season(year)` for each year → `ingest_rankings`), NOT a separate scoped-to-current-year refresh. | A season whose watermark cursor is `status=="complete"` short-circuits after a single `watermarks.get()` *before any CSV is read* (`sackmann/adapter.py:269-271`), so the first run self-seeds history and every subsequent run collapses to cheap all-skips — no separate one-time backfill command is needed for v1. **Known limitation (carry-forward, not fixed in P7):** `ingest_season` unconditionally marks a clean season `"complete"` (`adapter.py:313`), so once the *current* season is marked complete, later-finalized current-season matches are skipped until that watermark is reset — a Sackmann watermark-semantics issue, out of P7 scope. |
+| L7 | **The per-run heartbeat emitter is delivered via `AgentContext.heartbeat`, not the agent constructor.** `AgentContext` gains `heartbeat: Callable[[], None]` defaulting to a module-level no-op. `DailyPipeline.run_once()` builds the emitter (a closure over the **real** clock + `run_id`/`attempt`) and threads it on the per-run context; `DataAgent` calls `ctx.heartbeat()` between adapter steps. | `run_id`/`attempt` only exist once a run has started, but `DataAgent` is built once at wiring time — so the emitter cannot be a constructor argument. The per-run context is the correct carrier, and a no-op default keeps every existing `AgentContext` construction valid and lets agents run outside a pipeline (tests). Beats fire only *between* steps, so a long Sackmann loop can exceed `orphan_after_s` with no beat; that no-longer-self-orphans because overlap is now prevented by the §L9 singleton lock (the original "cron, no overlap" assumption is enforced in code, not trusted). |
+| L8 | **A final `update_status` failure after a successful `agent.run()` propagates; it is not swallowed.** If the terminal `runs.update_status(...)` write raises, the exception surfaces (no silent catch, no fabricated terminal status). The run row is left `'running'` and is reaped by the next day's orphan sweep (`mark_failed_with_reason`). | Swallowing the write failure would either lose the run outcome or fabricate a status the DB never recorded. Propagating surfaces the infrastructure failure loudly; the orphan sweep self-heals the dangling row within one cron cycle. No compensating retry / two-phase commit in v1 — the orphan-sweep recovery already covers it. |
+| L9 | **`DailyPipeline.run_once()` runs under a cluster-wide singleton advisory lock (`PipelineRunRepository.advisory_lock` → `pg_try_advisory_lock`).** The lock is taken BEFORE the orphan sweep and held for the whole run; if it cannot be acquired, `run_once()` logs `pipeline_already_running` and returns `None` — no row inserted, no sweep, agent not invoked. A DB failure acquiring the lock is a startup failure (`PipelineStartupError`). | (Codex HIGH.) §L7's orphan sweep marks ALL stale `running` rows failed; without mutual exclusion a scheduler retry / manual trigger / >24h overrun could start a second run that reaps the first *still-live* run's row, corrupting lineage. Enforcing singleton execution at the DB level (cluster-wide, not just per-host) makes the §L7 no-overlap assumption a guarantee. A session-level advisory lock (not the `_xact_` variant) survives the commits the run makes on other pooled connections and is released explicitly on exit. |
+| L10 | **Exception text is sanitized before it is persisted to `pipeline_runs.error` JSONB or logged.** `AgentError.cause` is `f"{type(exc).__name__}: {redact_text(str(exc))}"` (never raw `repr(exc)`); orchestrator startup/heartbeat error logs pass through `redact_text` too. `core.logging.redact_text` masks credential-bearing substrings (`apiKey=`, bearer tokens, URL userinfo) in free text. | (Codex HIGH.) The structlog redactor masks event-dict values by *key name* only; it cannot see a secret embedded in a free-text exception message (e.g. a transport error carrying `?apiKey=…`). Storing/logging raw `repr(exc)` at the orchestration layer bypassed adapter-level log hygiene and leaked the key into Postgres + logs. Content-level redaction closes that path while keeping the exception type for triage. |
+| L11 | **Venue coordinates are sourced from a static, manually-reviewed `config/venue_coords.yaml` (generated once via `scripts/geocode_venues.py` using GeoPy/Nominatim); there is NO runtime geocoding.** `DataAgent._step_geocode_venues()` reads the YAML and idempotently `upsert`s venues immediately *before* the OWM step (so `list_all()` then enumerates coord-bearing rows, activating the §L5 fetch path). Venues are **city-level**: the `venues` table is keyed on `(city, country_code)` with `venue_id = stable_hash_int63(("venue", city, country_code))` and has no `indoor`/`surface` columns (those are tournament attributes) — so same-city events collapse to ONE venue (dedup on `(city, country_code)`, first-occurrence wins, so the Grand-Slam coords listed first win: Wimbledon over Queen's, Roland Garros over Paris Masters). The YAML retains `slug`/`name`/`indoor`/`surface` as reviewed metadata for future tournament linkage; only the 6 real `VenueRow` fields are persisted. A missing/malformed YAML logs `venue_coords_load_failed` and is skipped — never crashes the run, never an `AgentError`. Update the YAML when new tournaments join `included_tiers`. | A static reviewed file is reproducible, costs no quota, and removes a network dependency + failure mode from the daily cron (Nominatim has a 1 req/sec policy and misfires on bare city names — caught and corrected at review time, e.g. Los Cabos resolving to central Mexico). City-level granularity matches the committed schema with no migration; for weather, intra-city venue separation (Wimbledon vs Queen's ≈10 km) is immaterial. Best-effort load keeps a coords-file problem from taking down the whole ingest — OWM simply falls through to the §L5 empty-venues path. |
+
+---
+
 ## 13. Build & run quickstart
 
 ```powershell
@@ -624,8 +663,10 @@ $env:DATABASE_URL = "postgresql+psycopg://user:pass@host:5432/db"
 | 3 (post-review) | [hash TBD] | P5 post-review hardening (504→507 tests). Auto-review fixes: added `OddsApiAdapter.backfill_from_config()` so `coverage_start_year` (H11) is actually consumed instead of silently ignored (HIGH); §15.5 market-signal Coverage column corrected `2009+`→`~2020 (H11)` on all 8 rows (MEDIUM). Codex adversarial-review fixes: `_walk_year` now guards a non-advancing/repeated `next_timestamp` (visited-cursor set + strict-advance check) — dead-letter once, count failure, break the year; never loops forever (CRITICAL); a malformed (non-`Mapping`) historical wrapper becomes a counted failure + dead-letter instead of an uncaught `AttributeError` that aborts the run (HIGH); added the Shin (1993) source citation and a `shin_formula_degenerated` structured warning on the proportional fallback. New locked decision J4 (§J): the opening/closing post-pass is non-atomic — accepted v1 limitation (deferred MEDIUM, mirrors O4). |
 | 3 | [hash TBD] | ATP website scraper adapter P6 (507→564 tests, +57): `adapters/atp_scraper/{client,parser,adapter}.py` + `MatchRepository.update_live_fields` (Protocol + impl) + `MatchRepositoryImpl.upsert` re-keyed to the `match_id` PK. Unauthenticated scraper with deterministic UA rotation, token-bucket throttle, 401/403/429/5xx mapping, `utf-8 errors='replace'` decode; pure BeautifulSoup HTML→DTO parsers; cross-source identity via §K1 `match_id` reconciliation (get→skip-final / `update_live_fields` / `upsert`), §K2 sorted-slug `source_uid`, §K3 tournament-week-start `match_date` so `match_id` agrees with Sackmann; slug→Sackmann-alias→shadow player resolution; within-source intraday audit; failure-aware watermark with I2 skip-vs-failure split. New locked decisions K1–K4 (§K). Resolves the long-pending §I1. |
 | 3 (post-review) | [hash TBD] | P6 post-review hardening (564→567 tests). Auto-review HIGH fixes: documented `ingestion.intraday_conflict.enabled` config key; split `_process_match` so `PlayerResolutionError` is a skip not a failure (I2). Codex adversarial-review fixes: zero-parse guard — a tournament page parsing to zero matches is now a counted failure + `ZeroParsedMatches` dead-letter (incomplete watermark), never silent success (CRITICAL); per-row parse isolation — a naive `start_ts` row yields a `None` sentinel so the rest of the page still ingests, instead of aborting the tournament (HIGH); `upsert` `DO UPDATE` no longer rewrites `source`/`source_uid` (identity kept from first writer; avoids secondary-unique collision) (HIGH); intraday-flag write failures decoupled from watermark completion — logged, not counted (MEDIUM). New locked decisions K5 (retired-replayed `match_id` collision accepted v1) and K6 (K4 runtime conflict behavior verified in Docker-gated integration tests only) (§K). |
+| 4 | [hash TBD] | Venue geocoding (P7 follow-on, 593→595 tests, +2): `scripts/geocode_venues.py` (one-shot GeoPy/Nominatim) generates `config/venue_coords.yaml` (58 entries, manually reviewed; one Nominatim misfire on Los Cabos corrected). `DataAgent._step_geocode_venues()` idempotently upserts city-level venues from the YAML before the OWM step, closing the §L5 weather gap. T21 (`test_agent.py`, 2 methods) covers the happy path (collision collapse, correct `venue_id`, runs before OWM) and the missing-YAML degrade. New locked decision L11 (§L). |
+| 4 | [hash TBD] | DataAgent orchestrator P7 (567→593 tests, +26): `agents/data/agent.py` (`DataAgent`) + `agents/orchestrator/pipeline.py` (`DailyPipeline`). Prerequisites: `VenueRepository.list_all` (Protocol + impl, for OWM venue enumeration) and `AgentContext.heartbeat` (additive no-op-default field, resolves the per-run-emitter-vs-once-built-agent circular dependency). DataAgent wires the four committed adapters in the §J2 data-write order (scraper→Sackmann→Odds→Weather) with adapter-level fault isolation, a Sackmann staleness pre-flight halt, a single `as_of` threaded via a pinned clock, and a per-adapter metrics dict. DailyPipeline owns the `pipeline_runs` lifecycle: orphan sweep → `running` row → heartbeat closure (real clock) → terminal status (`succeeded`/`partial`/`failed`) → `update_status`; `PipelineStartupError` for DB-unavailable-at-startup. Post-Codex hardening: cluster-wide singleton advisory lock around `run_once()` (`PipelineRunRepository.advisory_lock`) so overlapping runs can't reap each other's live rows, and `redact_text` sanitization of exception text before it reaches `pipeline_runs.error`/logs. New locked decisions L1–L10 (§L); 593 tests. |
 
-Next session resumes at **Day 3 — Data Agent build (P7 orchestrator)**; all four source adapters — Sackmann (P3), weather (P4), odds (P5), ATP scraper (P6) — are complete. §I1 is resolved (§K1–§K4). P7 wires the adapters into the DataAgent pipeline, enforcing the §J2 order (ATP scraper → Sackmann publish → odds) and the cron/heartbeat orchestration.
+Next session resumes at **Day 4 — Research Agent**; the DataAgent (P7) wires all four source adapters into `DailyPipeline.run_once()`. Remaining glue (DI adapter-factory wiring + cron shim) is the deferred thin layer noted in §5.
 
 ---
 

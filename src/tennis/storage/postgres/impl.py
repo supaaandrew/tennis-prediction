@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import Callable, Iterable, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -264,6 +264,15 @@ class VenueRepositoryImpl:
                 )
             ).scalar_one_or_none()
             return _orm_to_row(o, VenueRow) if o else None
+
+    def list_all(self) -> Sequence[VenueRow]:
+        with self._sf() as s:
+            rows = (
+                s.execute(select(m.Venue).order_by(m.Venue.venue_id))
+                .scalars()
+                .all()
+            )
+            return [_orm_to_row(o, VenueRow) for o in rows]
 
     def upsert(self, row: VenueRow) -> VenueRow:
         values = _row_to_dict(row, drop_none_for=_SERVER_MANAGED)
@@ -1224,6 +1233,27 @@ class PipelineRunRepositoryImpl:
                 if agent not in result:
                     result[agent] = status
             return result
+
+    @contextmanager
+    def advisory_lock(self, *, key: int) -> Iterator[bool]:
+        # Session-level advisory lock (NOT the *_xact_* variant): it is held on
+        # the connection until explicitly unlocked, independent of transaction
+        # boundaries, so it survives the commits the run performs on OTHER
+        # pooled connections. We keep this one session open for the duration of
+        # the `yield` so the lock is held across the whole run.
+        with self._sf() as s:
+            acquired = bool(
+                s.execute(select(func.pg_try_advisory_lock(key))).scalar_one()
+            )
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    # Release explicitly — a pooled connection returned with the
+                    # lock still held would never auto-release it. Suppress on a
+                    # dead connection: backend exit releases the session lock.
+                    with suppress(Exception):
+                        s.execute(select(func.pg_advisory_unlock(key)))
 
 
 class IngestWatermarkRepositoryImpl:

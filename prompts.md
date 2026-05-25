@@ -527,3 +527,84 @@ daily pipeline enforcing the §J2 order (ATP scraper → Sackmann publish → od
 with cron + heartbeat + dead-letter. Carry forward: validate the scraper's real
 ATP HTML selectors before trusting ingest; the zero-parse guard turns silent
 drift into a loud failure — wire it to alerting in P7.
+
+## Session 2026-05-25 — P7 DataAgent orchestrator + venue geocoding
+
+(One uncommitted delta against `b87b08c`: the P7 build, its Codex hardening, and
+the venue-coords follow-on commit together. This entry covers both — prompts.md
+had no P7 entry because the P7 session ran out of context before its summary.)
+
+**Prompt:** (1) Build the first agent — `DataAgent` wiring the four committed
+adapters into one daily ingest + `DailyPipeline` owning the `pipeline_runs`
+lifecycle — locking §L first, TDD. (2) Follow-on: close the §L5 weather gap by
+geocoding the ATP venue calendar into `config/venue_coords.yaml` (GeoPy/Nominatim)
+and having DataAgent upsert venues before the OWM step.
+
+**Shipped:**
+- `src/tennis/agents/data/{__init__,agent.py}` — `DataAgent(Agent)`: §J2 order
+  (scraper → Sackmann → odds → weather), per-adapter fault isolation, Sackmann
+  staleness pre-flight halt, single `as_of` via pinned `ctx.clock`, per-adapter
+  metrics dict, `redact_text`-sanitized error causes (§L10), and the §L11 venue
+  geocode pass before OWM.
+- `src/tennis/agents/orchestrator/{__init__,pipeline.py}` — `DailyPipeline.run_once()`:
+  cluster-wide singleton advisory lock → orphan sweep → `running` row → real-clock
+  heartbeat closure → terminal status (`succeeded`/`partial`/`failed`) →
+  `update_status`; `PipelineStartupError` on DB-unavailable-at-startup.
+- Prereqs: `VenueRepository.list_all()` (Protocol + impl + integration test) for OWM
+  venue enumeration; `AgentContext.heartbeat` (additive no-op-default field) resolving
+  the per-run-emitter vs once-built-agent circular dependency.
+- `core/logging.py` `redact_text()` (content-level credential redactor);
+  `core/errors.py` `PipelineStartupError`.
+- `scripts/geocode_venues.py` (one-shot GeoPy/Nominatim) → `config/venue_coords.yaml`
+  (58 entries: 4 GS, 9 M1000, 16 ATP500, 29 ATP250; manually reviewed).
+  `DataAgent._step_geocode_venues()` idempotently upserts **city-level** venues
+  (dedup on `(city, country_code)`, GS-first wins) before OWM.
+- Tests: **567 → 593** (P7: +26 — T1–T20 DataAgent control flow + DailyPipeline
+  lifecycle + singleton-lock + secret-redaction) **→ 595** (venue: +2 — T21 happy
+  path + missing-YAML degrade). Full unit suite green (~5.4s), no Docker.
+
+**Patterns/decisions locked this session:**
+- **§L1** intra-agent step order = §J2 data-write order; staleness is a pre-flight
+  *gate*, not a write step. **§L2** per-adapter fault isolation → status mapping
+  (effective-complete keys on `result.complete`, not "did it throw"). **§L3**
+  staleness / pre-flight error → `'failed'`, no adapter runs. **§L4** one `as_of`
+  threaded via pinned `FrozenClock`; the **real** clock never enters `AgentContext`
+  (load-bearing — a frozen heartbeat would self-orphan a live run). **§L5** empty
+  venue set is `'succeeded'` + warning, not a downgrade. **§L6** daily Sackmann =
+  full configured range, watermark-gated. **§L7** heartbeat delivered via
+  `ctx.heartbeat` (built per-run, closes over real clock + run_id). **§L8** final
+  `update_status` failure propagates (orphan sweep self-heals). **§L9** singleton
+  advisory lock around `run_once()`. **§L10** exception text redacted before
+  persist/log. **§L11** static reviewed venue YAML, no runtime geocoding;
+  city-level venues (no indoor/surface columns — those are tournament attrs).
+
+**Codex findings (adversarial review — P7 only):** HIGH — overlapping `run_once()`
+invocations could orphan-sweep each other's *live* rows (no mutual exclusion)
+(**fixed**: cluster-wide `pg_try_advisory_lock` singleton; second caller logs
+`pipeline_already_running` and returns `None`, no row written — §L9); HIGH —
+`cause=repr(exc)` could carry a credential-bearing URL into `pipeline_runs.error`
+JSONB + logs, bypassing adapter log hygiene (**fixed**: content-level `redact_text`
++ `type(exc).__name__: redacted` cause — §L10). The structlog redactor only masks
+by *key name*, so a secret in a free-text exception message needed a separate
+content redactor. The venue follow-on was NOT sent through RUN REVIEW /
+adversarial-review (user-approved skip — small reviewed-data + idempotent,
+fully-tested pass).
+
+**Self-found / flagged (carry-forward honesty):** found+fixed a CRITICAL `.gitignore`
+bug during P7 — a bare `data/` pattern was ignoring the entire `agents/data/`
+module (would have dropped DataAgent from the commit + blinded the auto-review);
+changed to root-anchored `/data/`. Caught one Nominatim misfire (Los Cabos →
+central Mexico) and corrected it. A few venue coords are city-centroids, not the
+exact tennis complex (acceptable at weather scale; the 4 GS + Mallorca were sharpened
+to stadium coords on user request). `geopy` installed in `.venv` for the one-shot
+script only — NOT a runtime dep (§L11 forbids runtime geocoding); `pyproject` untouched.
+
+**New locked decisions:** L1–L11 (§L).
+
+**Next:** Research Agent — `features/`, `point_in_time.py`, Elo extractor. Derives
+the `feature_matrix` from the raw rows DataAgent writes, under strict PIT (§15 recap:
+live cut at `start_ts − 24h`, historical at `match_date − 1d`; `fm_no_lookahead`
+trigger enforces). Clean values only — noise injection lives in Modeling (H1).
+Also still deferred from P7: the thin DI adapter-factory wiring + cron shim that
+actually invokes `DailyPipeline.run_once()` (the entrypoint exists; only glue +
+scheduler remain).

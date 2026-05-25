@@ -214,3 +214,13 @@ class OrphanedRunError(LineageError):
             f"orphaned run detected: run_id={run_id} agent={agent!r} "
             f"last_heartbeat_at={last_heartbeat_at!r}"
         )
+
+
+class PipelineStartupError(LineageError):
+    """The orchestrator could not even start a run — the database was
+    unavailable while sweeping orphans or inserting the `running` row.
+
+    No `pipeline_runs` row exists yet, so the outcome cannot be recorded in the
+    table; the failure surfaces out-of-band (raised + logged) so the cron
+    wrapper exits non-zero (§L2 'failed at startup').
+    """
