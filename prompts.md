@@ -915,3 +915,49 @@ match_ids design, empty fast-path, no chunking v1, repo-typed-`StorageError` +
 extractor-narrowed degrade, intentional behavior delta from §M14, M2 metric deferral).
 **Next:** R7 — fatigue + market-signal extractors, appended to the R6a §M4
 extractor-factory registry (additive, no `agent.py` change).
+
+## Session 2026-05-26 — R7: Fatigue + Market-signal extractors
+**Prompt:** Build R7 (the final two §15.5 feature families) — `FatigueExtractor` +
+`MarketExtractor` — plugged into the R6a §M4 extractor-factory registry. Four
+pre-build clarifications were resolved against ground truth first: (1) market
+live-vs-backtest gating keyed on `fctx.match.status` (locked §M19); (2) VenueRow
+coords are `latitude`/`longitude` not `lat`/`lon`; (3) `bo5_sets_equivalent` does NOT
+exist and the §15.5 fatigue catalog has no bo5 multiplier → catalog-faithful (no
+multiplier); (4) `odds_drift_to_close` is a per-tournament cross-match aggregate with
+no repo support → deferred (seed key, emit NULL in v1).
+**Shipped:** `agents/research/features/fatigue.py` (`FatigueExtractor`, 12 keys) +
+`market.py` (`MarketExtractor`, 8 keys) + matching `tests/unit/.../test_{fatigue,market}.py`.
+`specs.py`: registered `"fatigue"`(12)/`"market"`(8) families (§M7 lockstep). `agent.py`:
+`odds_repo` added to `_ExtractorDeps` + ctor + `_build_extractors`; both factories
+appended to `_ORDINARY_FAMILY_FACTORIES` (additive, §M4 — 9 families now). `test_specs.py`:
+9-family registry set + `test_r7_families_registered` + all-families round-trip.
+Fatigue: catalog-faithful (NO bo5 multiplier; `best_of` not read; C14 retirement(0.5)/
+walkover(0) weighting); `last_played` = most-recent C14-counted prior (shared by rest_days
++ travel); debut→all-NULL, rested→0.0, pre-1991 minutes NULL-by-absence; haversine on
+`venues.latitude/longitude`. Market: Pinnacle opening/closing/decision + proportional
+decision + line_movement + cross-book consensus + vig + odds_drift; §M19 status gate
+(closing-derived keys NULL unless `status=="final"`); `odds_drift_to_close` always NULL
+(v1 defer); C9 missing→all-NULL. **Tests 897 → 968 (+71 unit; +1 Docker-gated integration).**
+**Codex findings:** 0 CRITICAL / 2 HIGH / 1 MEDIUM, all triaged VALID + fixed.
+**HIGH (1)** — `OddsSnapshotRepositoryImpl.latest_before` used strict `< captured_before`
+but §15.4 locks the decision boundary as `captured_at ≤ as_of_ts`; my test fake used `<=`
+(contract-correct), masking the impl's deviation. Fixed `impl.py` `<`→`<=`, documented
+the inclusive boundary on the Protocol, added a real-repo boundary-inclusion integration
+test. Sole consumer is the R7 market extractor; PIT-safe (`as_of_ts < start_ts` always).
+**HIGH (2)** — fatigue travel resolution did per-match/per-player `tournament_repo.get`
++ `venue_repo.get` with no memoization (reintroducing a §M18-style N+1). Added run-scoped
+caches (`venue_id→coords`, `tournament_id→venue_id`); caches clean data resolutions only,
+never a `StorageError` outcome (transient errors aren't poisoned into permanent misses).
++2 regression tests (call-count + error-not-cached). **MEDIUM** — market keys bound the
+devig method to `config.features.market.devig_method_{primary,fallback}`, so a config swap
+would store proportional values under the Shin-named keys. Pinned `_SHIN`/`_PROPORTIONAL`
+module constants (mirrors `conditions.py`'s `_SOURCE="owm"`) — the method is part of the
+feature identity, fixed by §15.5, not a tunable. Auto-review (RUN REVIEW): ✅ 0 CRITICAL;
+its lone HIGH was a misleading test name (`test_null_when_no_book_has_decision` actually
+asserted a non-NULL fallback) → renamed `test_opening_snapshot_counts_as_decision_time_snapshot`.
+**New locked decisions:** M19 (Fatigue + Market families — no-bo5 catalog faithfulness,
+§M19 status gate keyed on `fctx.match.status`, `odds_drift_to_close` v1 deferral, devig-pin,
+`latest_before` `≤` boundary fix, travel memoization, structural fatigue windows need no
+§M12 guard).
+**Next:** Modeling Agent (`agents/modeling/`) — stacking ensemble + calibration + edge vs
+bookmaker implied, reading `feature_matrix` (noise injection happens HERE per H1).

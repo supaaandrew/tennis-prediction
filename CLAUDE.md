@@ -33,7 +33,7 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ R5b               Conditions (weather + venue) extractor — features/conditions.py, "conditions"(9) base family in specs registry, §M15, 871 tests (post-review). §M3 wind_serve_risk/altitude_serve_boost interactions DEFERRED (config curves + cross-family serve profile)
 ✅ R6a               ResearchAgent orchestrator — agents/research/agent.py (mode ctor flag, §M4 factory registry, FeatureContext build, validate→write, §M12 guard@ctor) + EloSnapshotRepository.career_match_counts() + pipeline precondition gate/exception safety net, §M16/§M17/§L12, 892 tests (post-review)
 ✅ R6b               Serve/return bulk match_stats read — MatchStatRepository.list_for_player (Protocol+impl, bulk dual of get) retires the §M14 N+1; ServeReturnExtractor fetches 1 bulk read/player; §M18, 897 tests (post-review). Codex M1 fixed (repo wraps SQLAlchemyError→StorageError; extractor narrows to StorageError so real bugs propagate loudly), M2 deferred (no bulk_read_failures metric — Monitor-agent owned)
-⬜ R7                Fatigue + Market signals extractors (plugs into R6a §M4 factory registry)
+✅ R7                Fatigue + Market signals extractors — features/{fatigue,market}.py, "fatigue"(12)/"market"(8) families in specs registry, §M19, 968 tests (post-review). Fatigue catalog-faithful (no bo5 multiplier; C14-driven; memoized venue lookups). Market §M19 status-gate; odds_drift_to_close deferred-NULL v1. Codex R7: latest_before <→<= (§15.4), fatigue travel N+1 memoized, devig methods pinned to constants
 ⬜ Modeling Agent    stacking ensemble, calibration, edge
 ⬜ Briefing Agent    Claude API, RAG, email
 ⬜ Orchestrator wiring  DI adapter-factory wiring + cron shim → DailyPipeline.run_once() (thin, deferred)

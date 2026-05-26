@@ -3,7 +3,7 @@
 Exercises real control flow with in-memory fakes (no Docker): training vs
 prediction scope, the §M12 windows guard, the decision-2 None-tournament
 skip+dead-letter, per-match fault isolation, the C10 validate-before-write gate,
-feature_specs seeding, the seven-family merge, and heartbeat emission. Uses the
+feature_specs seeding, the nine-family merge, and heartbeat emission. Uses the
 REAL extractors via the default registry so the merged matrix is a faithful row;
 the per-family math is covered by the family-level tests.
 """
@@ -170,6 +170,25 @@ class _FakeVenueRepo:
         return row
 
 
+class _FakeOddsRepo:
+    """In-memory OddsSnapshotRepository: no snapshots → every market key NULL (C9)."""
+
+    def insert(self, row):
+        return row
+
+    def list_for_match(self, *, match_id, bookmaker=None):
+        return []
+
+    def opening(self, *, match_id, bookmaker, devig_method):
+        return None
+
+    def closing(self, *, match_id, bookmaker, devig_method):
+        return None
+
+    def latest_before(self, *, match_id, bookmaker, devig_method, captured_before):
+        return None
+
+
 class _FakeFeatureSpecRepo:
     def __init__(self):
         self.specs: dict[tuple[str, int], object] = {}
@@ -239,6 +258,7 @@ def _agent(config, *, mode, match_repo, elo_repo=None, tournament_repo=None,
         stat_repo=_FakeStatRepo(),
         weather_repo=_FakeWeatherRepo(),
         venue_repo=_FakeVenueRepo(),
+        odds_repo=_FakeOddsRepo(),
         feature_spec_repo=feature_spec_repo or _FakeFeatureSpecRepo(),
         feature_matrix_repo=feature_matrix_repo or _FakeFeatureMatrixRepo(),
         dead_letter=dead_letter or _FakeDeadLetter(),
@@ -432,7 +452,7 @@ class TestValidatorGate:
 # Seeding + merge + heartbeat
 # ---------------------------------------------------------------------------
 class TestSeedingMergeHeartbeat:
-    def test_seeds_all_seven_families(self, config: AppConfig) -> None:
+    def test_seeds_all_nine_families(self, config: AppConfig) -> None:
         match_repo = _FakeMatchRepo()  # empty scope still seeds at startup
         fs = _FakeFeatureSpecRepo()
         agent = _agent(config, mode="training", match_repo=match_repo,
@@ -443,7 +463,7 @@ class TestSeedingMergeHeartbeat:
         expected_keys = {
             row.feature_key
             for fam in ("elo", "rankings", "form", "h2h", "surface",
-                        "serve_return", "conditions")
+                        "serve_return", "conditions", "fatigue", "market")
             for row in specs._REGISTRY[fam]
         }
         seeded_keys = {fk for (fk, _v) in fs.specs}
@@ -461,9 +481,13 @@ class TestSeedingMergeHeartbeat:
         assert len(fm.rows) == 1
         payload = fm.rows[0].payload
         # one representative key per family must be present in the merged row
+        # (R7 fatigue/market keys present too — NULL here: lone final has no priors
+        # and the fake odds repo has no snapshots).
         for key in ("p1_elo_pre", "p1_rank_stale", "p1_win_rate_7d",
                     "h2h_matches", "surface_transition_type",
-                    "p1_ace_rate_365d", "indoor"):
+                    "p1_ace_rate_365d", "indoor",
+                    "p1_rest_days", "p1_implied_pinnacle_decision",
+                    "odds_drift_to_close"):
             assert key in payload, f"missing {key}"
         # H1: clean values — base Elo carries the 1500 cold-start fallback.
         assert payload["p1_elo_pre"] == 1500.0

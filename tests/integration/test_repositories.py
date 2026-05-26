@@ -720,6 +720,60 @@ class TestUpsertIdempotency:
 
 
 # ---------------------------------------------------------------------------
+# OddsSnapshotRepository.latest_before() — §15.4 inclusive decision boundary
+# ---------------------------------------------------------------------------
+class TestOddsLatestBeforeBoundary:
+    """§15.4 locks the decision-time bound as `captured_at <= as_of_ts`. A snapshot
+    captured EXACTLY at the cut must be returned, not dropped (Codex R7 HIGH — the
+    real repo previously used strict `<`, diverging from the contract + the fake)."""
+
+    def test_snapshot_at_exact_boundary_is_included(self, session_factory: Any) -> None:
+        from tennis.storage.postgres.impl import (
+            MatchRepositoryImpl, OddsSnapshotRepositoryImpl,
+            PlayerRepositoryImpl, TournamentRepositoryImpl, VenueRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import OddsSnapshotRow
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches_repo = MatchRepositoryImpl(session_factory)
+        odds = OddsSnapshotRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="BoundaryCity", country="BD1")
+        t = _seed_tournament(tournaments, slug="boundary-t", venue_id=v.venue_id)
+        p1 = _seed_player(players, source_uid="bndA")
+        p2 = _seed_player(players, source_uid="bndB")
+        match = _seed_match(
+            matches_repo, tournament_id=t.tournament_id,
+            p1_id=p1.player_id, p2_id=p2.player_id,
+            round="QF", match_date=date(2026, 8, 6),
+            status="scheduled", source_uid="boundary-match",
+        )
+
+        cut = datetime(2026, 8, 6, 9, 0, tzinfo=UTC)
+        odds.insert(OddsSnapshotRow(
+            match_id=match.match_id, bookmaker="pinnacle",
+            captured_at=cut - timedelta(hours=2),
+            p1_decimal=1.90, p2_decimal=1.95,
+            p1_implied=0.50, p2_implied=0.50, vig=0.05, devig_method="shin",
+        ))
+        odds.insert(OddsSnapshotRow(
+            match_id=match.match_id, bookmaker="pinnacle", captured_at=cut,
+            p1_decimal=1.80, p2_decimal=2.05,
+            p1_implied=0.55, p2_implied=0.45, vig=0.05, devig_method="shin",
+        ))
+
+        # captured_before == the boundary snapshot's captured_at → it MUST win.
+        got = odds.latest_before(
+            match_id=match.match_id, bookmaker="pinnacle",
+            devig_method="shin", captured_before=cut,
+        )
+        assert got is not None
+        assert got.p1_implied == 0.55  # the at-boundary snapshot, not the earlier one
+
+
+# ---------------------------------------------------------------------------
 # VenueRepository.list_all() — supports the DataAgent OWM venue enumeration (§L5)
 # ---------------------------------------------------------------------------
 class TestVenueListAll:

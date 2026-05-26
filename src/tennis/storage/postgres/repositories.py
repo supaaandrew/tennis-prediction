@@ -200,7 +200,12 @@ class OddsSnapshotRepository(Protocol):
         bookmaker: str,
         devig_method: DevigMethod,
         captured_before: datetime,
-    ) -> OddsSnapshotRow | None: ...
+    ) -> OddsSnapshotRow | None:
+        """The latest snapshot with `captured_at <= captured_before` for the
+        (match, bookmaker, devig_method), or None. The boundary is INCLUSIVE per
+        §15.4 — the decision-time feature uses `captured_at <= as_of_ts`, so a
+        snapshot captured exactly at the PIT cut qualifies."""
+        ...
 
 
 # ---------------------------------------------------------------------------

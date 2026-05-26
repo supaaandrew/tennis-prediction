@@ -728,7 +728,12 @@ class OddsSnapshotRepositoryImpl:
                     m.OddsSnapshot.match_id == match_id,
                     m.OddsSnapshot.bookmaker == bookmaker,
                     m.OddsSnapshot.devig_method == devig_method,
-                    m.OddsSnapshot.captured_at < captured_before,
+                    # Inclusive boundary (§15.4): the decision-time snapshot is the
+                    # latest with `captured_at <= as_of_ts`. A snapshot captured
+                    # exactly at the PIT cut is admissible (it predates the match —
+                    # as_of_ts < start_ts always) and must not be dropped, else the
+                    # market feature falsely NULLs at the boundary (Codex R7 HIGH).
+                    m.OddsSnapshot.captured_at <= captured_before,
                 )
                 .order_by(m.OddsSnapshot.captured_at.desc())
                 .limit(1)

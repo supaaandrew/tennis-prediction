@@ -50,8 +50,8 @@ def _form_rows() -> tuple[FeatureSpecRow, ...]:
 
 
 # R3 landed the first family ("elo"); R4 appends "rankings", "form", "h2h";
-# R5a appends "surface", "serve_return"; R5b appends "conditions" — all in
-# lockstep with their extractors (R7 families append theirs later). Each family's
+# R5a appends "surface", "serve_return"; R5b appends "conditions"; R7 appends
+# "fatigue", "market" — all in lockstep with their extractors. Each family's
 # extractor `feature_keys()` MUST equal its seeded rows here — guarded by the
 # per-family round-trip tests under `tests/unit/agents/research/features/`. The 9
 # Elo keys mirror §15.5 (the 7 base ratings are the §M8 critical keys; the two
@@ -127,6 +127,36 @@ _REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {
         FeatureSpecRow("altitude_m", 1, "int"),
         FeatureSpecRow("indoor", 1, "bool"),
         FeatureSpecRow("forecast_uncertainty_bucket", 1, "cat"),
+    ),
+    # R7 — the two §15.5 families left unassigned by R2–R6. Both non-critical
+    # (§M8). Fatigue: rest_days is whole days (int); the weighted counts/minutes and
+    # the travel distance are floats. Market: all implied/movement/vig values are
+    # floats; `odds_drift_to_close` is seeded for §M7 lockstep but emitted NULL in v1
+    # (deferred — see features/market.py). Each family's extractor `feature_keys()`
+    # MUST equal these rows (round-trip tests under tests/unit/.../features/).
+    "fatigue": (
+        FeatureSpecRow("p1_rest_days", 1, "int"),
+        FeatureSpecRow("p2_rest_days", 1, "int"),
+        FeatureSpecRow("p1_matches_last_7d", 1, "float"),
+        FeatureSpecRow("p2_matches_last_7d", 1, "float"),
+        FeatureSpecRow("p1_matches_last_14d", 1, "float"),
+        FeatureSpecRow("p2_matches_last_14d", 1, "float"),
+        FeatureSpecRow("p1_minutes_last_7d", 1, "float"),
+        FeatureSpecRow("p2_minutes_last_7d", 1, "float"),
+        FeatureSpecRow("p1_minutes_last_14d", 1, "float"),
+        FeatureSpecRow("p2_minutes_last_14d", 1, "float"),
+        FeatureSpecRow("p1_travel_km_since_last_match", 1, "float"),
+        FeatureSpecRow("p2_travel_km_since_last_match", 1, "float"),
+    ),
+    "market": (
+        FeatureSpecRow("p1_implied_pinnacle_opening", 1, "float"),
+        FeatureSpecRow("p1_implied_pinnacle_closing", 1, "float"),
+        FeatureSpecRow("p1_implied_pinnacle_decision", 1, "float"),
+        FeatureSpecRow("p1_implied_proportional_decision", 1, "float"),
+        FeatureSpecRow("line_movement_p1", 1, "float"),
+        FeatureSpecRow("consensus_implied_p1", 1, "float"),
+        FeatureSpecRow("vig_pinnacle_decision", 1, "float"),
+        FeatureSpecRow("odds_drift_to_close", 1, "float"),
     ),
 }
 

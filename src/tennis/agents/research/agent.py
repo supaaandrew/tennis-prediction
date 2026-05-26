@@ -1,6 +1,6 @@
 """ResearchAgent — the second pipeline agent (R6a).
 
-Assembles the seven R3–R5b feature families behind one agent, builds each
+Assembles the nine R3–R7 feature families behind one agent, builds each
 match's point-in-time `FeatureContext`, runs every extractor, validates the
 merged matrix (C10), and writes `feature_matrix` rows. It is the first agent
 with a non-empty precondition (`data` must have succeeded for the run — §AGENTS).
@@ -28,10 +28,10 @@ concern). Per-match fault isolation mirrors DataAgent (§L2/§L10): one bad matc
 is dead-lettered and skipped (→ `partial`), never aborting the slate; a rejected
 matrix is a hard C10 stop (→ `failed`), writing nothing.
 
-Extensibility (§M4): the six ordinary per-match families are built from an
+Extensibility (§M4): the eight ordinary per-match families are built from an
 ordered `extractor_factories` registry the agent iterates; R7 (fatigue/market)
-appends a factory (or the DI layer injects an extended list) and the
-run()/merge/validate logic is unchanged. Elo is the one mode-special family.
+appended its factories without touching run()/merge/validate. Elo is the one
+mode-special family.
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ from tennis.storage.postgres.repositories import (
     FeatureSpecRepository,
     MatchRepository,
     MatchStatRepository,
+    OddsSnapshotRepository,
     PlayerRankingRepository,
     TournamentRepository,
     VenueRepository,
@@ -63,8 +64,10 @@ from tennis.agents.research.context import FeatureContext, MatchHistoryIndex
 from tennis.agents.research.features.base import FeatureExtractor
 from tennis.agents.research.features.conditions import ConditionsExtractor
 from tennis.agents.research.features.elo import EloExtractor, EloWalk
+from tennis.agents.research.features.fatigue import FatigueExtractor
 from tennis.agents.research.features.form import FormExtractor
 from tennis.agents.research.features.h2h import H2HExtractor
+from tennis.agents.research.features.market import MarketExtractor
 from tennis.agents.research.features.rankings import RankingsExtractor
 from tennis.agents.research.features.serve_return import ServeReturnExtractor
 from tennis.agents.research.features.surface import SurfaceExtractor
@@ -98,13 +101,14 @@ class _ExtractorDeps:
     stat_repo: MatchStatRepository
     weather_repo: WeatherObservationRepository
     venue_repo: VenueRepository
+    odds_repo: OddsSnapshotRepository
 
 
 ExtractorFactory = Callable[[_ExtractorDeps], FeatureExtractor]
 
-# Ordered registry of the six ordinary per-match families (everything except the
-# mode-special `elo`). R7 appends here — or the DI layer injects an extended list
-# via the ctor — and `run()` is unchanged (§M4). The active family set used for
+# Ordered registry of the eight ordinary per-match families (everything except the
+# mode-special `elo`). R7 appended fatigue + market here — or the DI layer injects an
+# extended list via the ctor — and `run()` is unchanged (§M4). The active family set used for
 # seeding/validation is derived from whatever list the instance holds, so the
 # catalog (specs._REGISTRY) and the extractors stay in lockstep (§M7).
 _ORDINARY_FAMILY_FACTORIES: tuple[tuple[str, ExtractorFactory], ...] = (
@@ -118,6 +122,12 @@ _ORDINARY_FAMILY_FACTORIES: tuple[tuple[str, ExtractorFactory], ...] = (
         history=d.history, stat_repo=d.stat_repo, config=d.config)),
     ("conditions", lambda d: ConditionsExtractor(
         weather_repo=d.weather_repo, venue_repo=d.venue_repo, config=d.config)),
+    # R7 — additive (§M4). Fatigue also needs tournament_repo (to resolve a PRIOR
+    # match's venue for travel-km); market needs the new odds_repo dep.
+    ("fatigue", lambda d: FatigueExtractor(
+        history=d.history, tournament_repo=d.tournament_repo,
+        venue_repo=d.venue_repo, config=d.config)),
+    ("market", lambda d: MarketExtractor(odds_repo=d.odds_repo, config=d.config)),
 )
 
 
@@ -138,6 +148,7 @@ class ResearchAgent:
         stat_repo: MatchStatRepository,
         weather_repo: WeatherObservationRepository,
         venue_repo: VenueRepository,
+        odds_repo: OddsSnapshotRepository,
         feature_spec_repo: FeatureSpecRepository,
         feature_matrix_repo: FeatureMatrixRepository,
         dead_letter: DeadLetterRepository,
@@ -154,6 +165,7 @@ class ResearchAgent:
         self._stat_repo = stat_repo
         self._weather_repo = weather_repo
         self._venue_repo = venue_repo
+        self._odds_repo = odds_repo
         self._feature_spec_repo = feature_spec_repo
         self._feature_matrix_repo = feature_matrix_repo
         self._dead_letter = dead_letter
@@ -317,6 +329,7 @@ class ResearchAgent:
             stat_repo=self._stat_repo,
             weather_repo=self._weather_repo,
             venue_repo=self._venue_repo,
+            odds_repo=self._odds_repo,
         )
         return [factory(deps) for _, factory in self._factories]
 

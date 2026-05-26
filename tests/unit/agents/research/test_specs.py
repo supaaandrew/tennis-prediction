@@ -217,7 +217,7 @@ class TestProductionRegistry:
 
     def test_r4_families_registered(self) -> None:
         # R4 appended rankings/form/h2h; R5a adds surface/serve_return; R5b adds
-        # conditions — all in lockstep with their extractors.
+        # conditions; R7 adds fatigue/market — all in lockstep with their extractors.
         assert set(_REGISTRY) == {
             "elo",
             "rankings",
@@ -226,6 +226,8 @@ class TestProductionRegistry:
             "surface",
             "serve_return",
             "conditions",
+            "fatigue",
+            "market",
         }
         assert {row.feature_key for row in _REGISTRY["rankings"]} == {
             "p1_rank_pre",
@@ -309,10 +311,47 @@ class TestProductionRegistry:
         assert by_key["forecast_uncertainty_bucket"].dtype == "cat"
         assert by_key["temp_c_decision"].dtype == "float"
 
-    def test_r4_r5a_r5b_families_round_trip_and_non_critical(self) -> None:
+    def test_r7_families_registered(self) -> None:
+        # R7: fatigue = 12 §15.5 keys (rest_days int; counts/minutes/travel float);
+        # market = 8 §15.5 keys (all float; odds_drift_to_close seeded but emitted
+        # NULL in v1 — deferred).
+        assert {row.feature_key for row in _REGISTRY["fatigue"]} == {
+            "p1_rest_days",
+            "p2_rest_days",
+            "p1_matches_last_7d",
+            "p2_matches_last_7d",
+            "p1_matches_last_14d",
+            "p2_matches_last_14d",
+            "p1_minutes_last_7d",
+            "p2_minutes_last_7d",
+            "p1_minutes_last_14d",
+            "p2_minutes_last_14d",
+            "p1_travel_km_since_last_match",
+            "p2_travel_km_since_last_match",
+        }
+        assert len(_REGISTRY["fatigue"]) == 12
+        assert {row.feature_key for row in _REGISTRY["market"]} == {
+            "p1_implied_pinnacle_opening",
+            "p1_implied_pinnacle_closing",
+            "p1_implied_pinnacle_decision",
+            "p1_implied_proportional_decision",
+            "line_movement_p1",
+            "consensus_implied_p1",
+            "vig_pinnacle_decision",
+            "odds_drift_to_close",
+        }
+        assert len(_REGISTRY["market"]) == 8
+        # Catalog dtypes: fatigue rest_days is int, the rest float; all market float.
+        fatigue_by_key = {row.feature_key: row for row in _REGISTRY["fatigue"]}
+        assert fatigue_by_key["p1_rest_days"].dtype == "int"
+        assert fatigue_by_key["p1_matches_last_7d"].dtype == "float"
+        assert fatigue_by_key["p1_travel_km_since_last_match"].dtype == "float"
+        assert all(row.dtype == "float" for row in _REGISTRY["market"])
+
+    def test_all_families_round_trip_and_non_critical(self) -> None:
         # Seed + build against the PRODUCTION registry: every registered key must
-        # round-trip, and none of the R4/R5a/R5b families may be critical
-        # (§0.5/§M8 — every conditions key is legitimately nullable).
+        # round-trip, and none of the R4/R5/R7 families may be critical
+        # (§0.5/§M8 — every fatigue/market key is legitimately nullable).
         repo = _FakeFeatureSpecRepo()
         families = [
             "rankings",
@@ -321,6 +360,8 @@ class TestProductionRegistry:
             "surface",
             "serve_return",
             "conditions",
+            "fatigue",
+            "market",
         ]
         seed_feature_specs(repo, families=families)
         specs = build_expected_specs(repo, feature_set="v1", families=families)
