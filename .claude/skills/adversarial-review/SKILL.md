@@ -3,6 +3,22 @@ name: adversarial-review
 description: Generate a tailored Codex adversarial review prompt for the current working tree diff. Trigger when asked for adversarial review, Codex review, pre-commit review, or audit.
 ---
 
+First, make untracked files visible to `git diff HEAD` so newly-created files
+this session are included in the review target (without this, `git diff HEAD`
+shows only modified tracked files and brand-new modules are silently skipped).
+Run this in bash, at the very start, before anything else:
+
+    git add -N $(git ls-files --others --exclude-standard \
+      --exclude='*.pyc' \
+      --exclude='__pycache__' \
+      --exclude='.codex_prompt.txt' \
+      --exclude='review.md' \
+      --exclude='review_history.md') 2>/dev/null || true
+
+(`-N` / `--intent-to-add` makes untracked files appear in `git diff HEAD` as
+additions without staging their content; the excludes keep generated artifacts
+out of the diff.)
+
 Read these before generating the prompt:
 - git diff HEAD (uncommitted changes)
 - DECISIONS.md in full

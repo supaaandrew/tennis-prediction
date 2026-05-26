@@ -608,3 +608,56 @@ trigger enforces). Clean values only — noise injection lives in Modeling (H1).
 Also still deferred from P7: the thin DI adapter-factory wiring + cron shim that
 actually invokes `DailyPipeline.run_once()` (the entrypoint exists; only glue +
 scheduler remain).
+
+---
+
+## Session 2026-05-26 — R2: point_in_time + feature infrastructure + feature_specs seeding
+
+**Prompt:** Build the Research Agent foundation — the PIT cut, the shared
+extraction infrastructure, and the `feature_specs` seeding mechanism every
+later extractor (R3–R7) depends on. No feature family this session.
+
+**Shipped (595 → 660 tests, +65):**
+- `agents/research/point_in_time.py` — `pit_cut(match, *, live_offset_hours)`:
+  the authoritative §8/§A14 cut. Live = `start_ts − live_offset_hours` then
+  `.astimezone(UTC)`; historical = `match_date − 1 day` @ 00:00 UTC
+  (`_HISTORICAL_PIT_OFFSET_DAYS=1`, a structural constant, not config).
+- `agents/research/context.py` — `FeatureContext` (frozen+slots; rejects naive
+  `as_of_ts`) + `MatchHistoryIndex` (in-memory per-player + per-unordered-pair
+  index built from a match set; PIT-safe `player_matches_before` /
+  `last_match_before` / `h2h_before` using a representative instant with strict
+  `<`; the substrate R4/R5/R7 need since the repos expose no per-player query).
+- `agents/research/features/__init__.py` + `features/base.py` — the
+  `@runtime_checkable` `FeatureExtractor` Protocol (`name`, `feature_keys()`,
+  `extract(fctx)`).
+- `agents/research/specs.py` — lockstep `feature_specs` registry (empty in R2),
+  idempotent `seed_feature_specs`, and `build_expected_specs` (stamps `critical`
+  from `_CRITICAL_FEATURE_KEYS`, scoped to registered families, hard-fails on
+  catalog drift).
+- `agents/research/validator.py` — added `_CRITICAL_FEATURE_KEYS` (the 7
+  base-Elo rating keys; §15.6/M-d, code-side not a DB column).
+- `core/config.py` — `DecisionTimingSection.live_decision_offset_hours` gains
+  `gt=0`.
+
+**Codex findings (adversarial review — 0 CRITICAL / 0 HIGH after triage; 4 valid
+findings, all fixed):** (1) `build_expected_specs` silently dropped
+registered-but-unseeded keys → now raises `FeatureContractError` on catalog
+drift; (2) `pit_cut` accepted `live_offset_hours ≤ 0` (guaranteed lookahead) →
+now rejected + `gt=0` at config load; (3) live `pit_cut` could emit non-UTC →
+rejects naive `start_ts` then `.astimezone(UTC)` (a blind astimezone would have
+mis-converted a naive value); (4) `MatchHistoryIndex` crashed on naive `start_ts`
+at read time → `build()` rejects it up front. The RUN REVIEW hook was also
+restored this session (`pip install anthropic`; `.env`-key path verified
+end-to-end, `review.md` written) and the `adversarial-review` skill gained a
+leading `git add -N` so newly-created untracked files appear in the review diff.
+
+**New locked decisions:** M5 (PIT cut), M6 (`MatchHistoryIndex` PIT-instant
+convention), M7 (`feature_specs` lockstep + drift hard-fail), M8 (minimal
+`_CRITICAL_FEATURE_KEYS`) — all in §M. DECISIONS §5/§8 reconciled to
+`agents/research/` (M-f); only `agents/research/agent.py` (R6) remains unbuilt
+in the research package.
+
+**Next:** R3 — Elo extractor (`agents/research/features/elo.py`): a chronological
+walk over `final` matches writing `elo_snapshots` (H7) and emitting the §15.5 Elo
+feature family via the R2 `pit_cut` + `MatchHistoryIndex`. Spec in
+`research_specs.md` §R3; `spec.md` regenerated this session.

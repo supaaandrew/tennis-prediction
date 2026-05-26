@@ -197,12 +197,18 @@ Tennis_Prediction_Bot/
 │       ├── orchestrator/      # P7 — pipeline_runs lifecycle owner
 │       │   ├── __init__.py
 │       │   └── pipeline.py    # DailyPipeline.run_once(): sweep→run→heartbeat→status
-│       └── research/
+│       └── research/          # Research Agent (R2+ — feature derivation)
 │           ├── __init__.py
+│           ├── point_in_time.py # R2 — pit_cut(): the single PIT cutoff (§8/§A14)
+│           ├── context.py     # R2 — FeatureContext + MatchHistoryIndex (PIT-safe reads)
+│           ├── specs.py       # R2 — feature_specs registry + seeding + expected_specs builder
+│           ├── features/      # R2 — extractor families (R3 Elo, R4 form/H2H/rank, R5 serve/surface/weather, R7 fatigue/market)
+│           │   ├── __init__.py
+│           │   └── base.py    # FeatureExtractor Protocol (@runtime_checkable)
 │           └── validator.py   # FeatureMatrixValidator (orchestrator gate)
 └── tests/
     ├── conftest.py            # frozen_clock, repo_root, config_path
-    ├── unit/                  # 595 tests, all green locally
+    ├── unit/                  # 660 tests, all green locally
     │   ├── core/{test_clock,test_ids,test_normalize_player_name,test_errors,
     │   │       test_logging,test_config,test_di,test_lineage,test_contracts}.py
     │   ├── storage/{test_rows,test_repositories,test_session,test_impl}.py
@@ -213,6 +219,10 @@ Tennis_Prediction_Bot/
     │   └── agents/
     │       ├── data/test_agent.py            # 16 (P7 — DataAgent control flow + §L11 geocode pass)
     │       ├── orchestrator/test_pipeline.py # 10 (P7 — DailyPipeline lifecycle)
+    │       ├── research/test_point_in_time.py # R2 — pit_cut live/historical/tz + R4 agreement
+    │       ├── research/test_context.py       # R2 — FeatureContext + MatchHistoryIndex PIT reads
+    │       ├── research/test_specs.py         # R2 — seeding idempotency + expected_specs builder + drift guard
+    │       ├── research/features/test_base.py # R2 — FeatureExtractor Protocol
     │       └── research/test_validator.py
     ├── fixtures/
     │   └── atp_scraper/        # P6 — real-shape ATP HTML fragments for parser tests
@@ -224,8 +234,9 @@ Tennis_Prediction_Bot/
 ```
 
 Modules not yet built (Day 4+ work):
-`agents/research/{point_in_time.py, context.py, features/, agent.py}`
-— Research Agent feature modules live UNDER `agents/research/`, NOT at a
+`agents/research/agent.py` (R6 — ResearchAgent orchestrator; the R2
+`point_in_time.py`/`context.py`/`specs.py`/`features/` infrastructure is now
+built) — Research Agent modules live UNDER `agents/research/`, NOT at a
 top-level `features/` directory (the committed `agents/research/validator.py`
 and the `tennis.agents.research` import surface fix this location) —
 `agents/{modeling,briefing}/`, `models/`, `storage/qdrant/`, `cli.py`. The P7
@@ -308,7 +319,7 @@ that returns naive and corrupts under non-UTC session TZ).
 
 ## 8. PIT cutoff rule (load-bearing — A14)
 
-**Single source of truth: `features/point_in_time.py` (not yet built).**
+**Single source of truth: `agents/research/point_in_time.py`.**
 The Postgres trigger `fm_no_lookahead` is defense-in-depth ONLY.
 
 | Match state | Rule |
@@ -648,6 +659,10 @@ New feature rows are mirrored into §15.5; new config keys live under
 | M2 | Surface transition uses categorical `transition_type` + exposure counts only. `adaptation_formula = log1p(matches_on_new_surface)`. No redundant binary flags. Thresholds from `config.features.surface_transition`. | Binaries add no information beyond the count; `log1p` captures diminishing adaptation returns. |
 | M3 | Weather interactions v1: `wind_serve_risk` and `altitude_serve_boost` only. All other interactions deferred. Enabled list in `config.features.conditions_interactions.enabled`. | Sparse weather data makes interaction terms noisy; only the two highest-signal interactions are included in v1. |
 | M4 | R7 session planned for Fatigue + Market signals (`sets_played`, `minutes`, `rest_days`, bo5 weighting; Pinnacle implied, line movement, book disagreement). R6 ResearchAgent uses an extensible extractor registry so R7 plugs in without changing `agent.py`. | Fatigue and market signals require separate data joins; bundling into R5/R6 would blow context. |
+| M5 | **PIT cut (R2, `agents/research/point_in_time.py`).** `pit_cut(match, *, live_offset_hours)` is the authoritative `as_of_ts`: live = `start_ts − live_offset_hours` then `.astimezone(UTC)`; historical = `match_date − 1 day` @ 00:00 UTC. The historical 1-day offset is a structural constant `_HISTORICAL_PIT_OFFSET_DAYS=1` (NOT config); the live offset is `config.decision_timing.live_decision_offset_hours` (now `gt=0`). `pit_cut` rejects `live_offset_hours ≤ 0` and a naive `start_ts`. | The cut is the single most dangerous bug surface; one pure function owns it. A non-positive offset or naive/non-UTC `start_ts` could silently yield `as_of_ts ≥ start_ts` (lookahead) that passes R4 — so both are rejected loudly, and live output is UTC-normalized to honor the documented contract. |
+| M6 | **`MatchHistoryIndex` (R2, `context.py`).** In-memory per-player + per-unordered-pair index built once from a match set (`for_training`/`for_prediction`); the repos expose no per-player match query. PIT-safe reads use a representative instant `start_ts if not None else match_date @ 00:00 UTC` with strict `<` as_of — identical to `for_prediction`/validator R4 — and `build()` rejects a naive `start_ts`. | R4/R5/R7 extractors must read a player's prior matches under PIT; a shared, DB-free, unit-testable index is the substrate. The representative-instant boundary is a strict superset of "match_date < as_of" that also honors intraday `start_ts` and is never less PIT-safe; the consuming extractor narrows by window/surface. |
+| M7 | **`feature_specs` lockstep (R2, `specs.py`).** A registry maps family → `FeatureSpecRow`s and is appended to only by the session that lands the family's extractor (empty in R2). `seed_feature_specs` is idempotent; `build_expected_specs` builds the validator's `expected_specs` from the *registered* families only and hard-fails (`FeatureContractError`) when a registered key is not seeded (catalog drift). | Seeding the full v1 catalog before its extractors exist would make `FeatureMatrixValidator` reject every row for a "missing required feature". Silently dropping an unseeded registered key would let extractors and the validator diverge with no hard failure — so drift fails loud (§C10 ethos). |
+| M8 | **`_CRITICAL_FEATURE_KEYS` (R2, `agents/research/validator.py`, §15.6/M-d).** Code-side `frozenset` (NOT a `feature_specs` column), kept minimal per §0.5 — only the 7 base-Elo rating keys (`elo_diff_blended`, `p{1,2}_elo_pre`, `p{1,2}_elo_surface_pre`, `p{1,2}_elo_blended_pre`). Form/serve/market/weather/ranking and the Elo reliability booleans are nullable. | The validator's `critical` flag is per-spec (global), not per-row, so it cannot express "critical only where coverage exists" — marking a sometimes-NULL key critical would reject a legitimately sparse row (e.g. a debut player). Base Elo ratings always carry the 1500 cold-start fallback (H10) and are the only never-NULL keys. Pre-listing R3's keys is inert: `build_expected_specs` only stamps `critical` on keys actually seeded. |
 
 ---
 
@@ -689,8 +704,9 @@ $env:DATABASE_URL = "postgresql+psycopg://user:pass@host:5432/db"
 | 4 | [hash TBD] | DataAgent orchestrator P7 (567→593 tests, +26): `agents/data/agent.py` (`DataAgent`) + `agents/orchestrator/pipeline.py` (`DailyPipeline`). Prerequisites: `VenueRepository.list_all` (Protocol + impl, for OWM venue enumeration) and `AgentContext.heartbeat` (additive no-op-default field, resolves the per-run-emitter-vs-once-built-agent circular dependency). DataAgent wires the four committed adapters in the §J2 data-write order (scraper→Sackmann→Odds→Weather) with adapter-level fault isolation, a Sackmann staleness pre-flight halt, a single `as_of` threaded via a pinned clock, and a per-adapter metrics dict. DailyPipeline owns the `pipeline_runs` lifecycle: orphan sweep → `running` row → heartbeat closure (real clock) → terminal status (`succeeded`/`partial`/`failed`) → `update_status`; `PipelineStartupError` for DB-unavailable-at-startup. Post-Codex hardening: cluster-wide singleton advisory lock around `run_once()` (`PipelineRunRepository.advisory_lock`) so overlapping runs can't reap each other's live rows, and `redact_text` sanitization of exception text before it reaches `pipeline_runs.error`/logs. New locked decisions L1–L10 (§L); 593 tests. |
 
 | 4 (R1) | [hash TBD] | Research Agent session **planning** — no implementation, 595 tests unchanged. Created `AGENTS.md` (multi-agent orchestration layer: DAG, per-agent Postgres contracts, precondition/heartbeat/PIT/status-propagation sections) and `research_specs.md` (R3–R7 specs + mismatch register); rewrote `spec.md` to **R2** (point_in_time.py + feature infrastructure + feature_specs seeding). New locked decisions **M1–M4** (§M). Six §15.5 feature rows added (`h2h_win_rate_confidence`, `h2h_win_rate_weighted`, `surface_transition_type`, `surface_transition_exposure`, `wind_serve_risk` [2012+ OWM era], `altitude_serve_boost` [1991+ serve-stats era]) with matching config keys (`features.h2h`, `features.surface_transition`, `features.conditions_interactions`) + pydantic sub-configs (`H2HConfig`/`SurfaceTransitionConfig`/`ConditionsInteractionsConfig` on `FeaturesSection`). §15.6 critical-column note (`_CRITICAL_FEATURE_KEYS` lives in `agents/research/validator.py`; no `feature_specs.critical` column). §5 topology + CLAUDE.md reconciled to `agents/research/` (R7 added to build status). `adversarial-review` skill: post-Codex triage protocol appended. No Codex run this session (planning only). |
+| 4 (R2) | [hash TBD] | Research Agent **R2** — PIT + feature infrastructure + `feature_specs` seeding (595→660 tests, +65). New `agents/research/`: `point_in_time.py` (`pit_cut()` — the authoritative §8/§A14 cut), `context.py` (`FeatureContext` rejecting naive `as_of_ts` + `MatchHistoryIndex`, the PIT-safe in-memory per-player/per-pair index for R4/R5/R7 since the repos expose no per-player match query), `features/__init__.py` + `features/base.py` (`FeatureExtractor` Protocol), `specs.py` (lockstep `feature_specs` registry — empty in R2 — + idempotent `seed_feature_specs` + `build_expected_specs`). `validator.py`: added `_CRITICAL_FEATURE_KEYS` (the 7 base-Elo rating keys). `core/config.py`: `live_decision_offset_hours` gains `gt=0`. New locked decisions **M5–M8** (§M). Codex adversarial-review (0 CRITICAL / 0 HIGH after triage; 4 valid findings fixed): catalog-drift hard-fail in `build_expected_specs` (`FeatureContractError`); `pit_cut` rejects `live_offset_hours ≤ 0`; `pit_cut` rejects naive `start_ts` then `.astimezone(UTC)`; `MatchHistoryIndex.build` rejects naive `start_ts`. Tooling: review hook restored (`pip install anthropic`; verified end-to-end, `review.md` written); `adversarial-review` skill gains a leading `git add -N` so newly-created untracked files appear in the review diff. |
 
-Next session resumes at **R2 — point_in_time.py + feature infrastructure + feature_specs seeding** (`spec.md`); R3–R7 specs are in `research_specs.md`. The Research Agent derives `feature_matrix` from the committed DataAgent rows under strict PIT (live `start_ts − 24h`, historical `match_date − 1 day`). Remaining glue (DI adapter-factory wiring + cron shim) is the deferred thin layer noted in §5.
+Next session resumes at **R3 — Elo extractor** (`research_specs.md` §R3; `spec.md` regenerated by this session's `session-summary` wrap-up): a chronological walk over `final` matches that writes `elo_snapshots` (H7) and emits the §15.5 Elo feature family, using the R2 `pit_cut` + `MatchHistoryIndex`. R4–R7 specs remain in `research_specs.md`. Remaining glue (DI adapter-factory wiring + cron shim) is the deferred thin layer noted in §5.
 
 ---
 

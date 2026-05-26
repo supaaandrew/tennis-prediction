@@ -39,6 +39,31 @@ class FeatureSpec:
     critical: bool = False
 
 
+# Critical feature keys (DECISIONS §15.6 / mismatch M-d). This is deliberately
+# NOT a `feature_specs` column — `FeatureSpecRow` has no `critical` field; the
+# set lives here in code and the `expected_specs` builder stamps each
+# `FeatureSpec(..., critical=key in _CRITICAL_FEATURE_KEYS)`.
+#
+# Kept MINIMAL per research_specs §0.5: only keys that are *never* legitimately
+# NULL. The validator's `critical` flag is per-spec (global), not per-row, so it
+# cannot express "critical only where coverage exists" — marking a sometimes-NULL
+# key (form/serve/market/weather/ranking) critical would reject a legitimately
+# sparse row (e.g. a debut player). The base Elo ratings always carry the 1500
+# cold-start fallback (H10) and so are the only never-NULL keys today. Later
+# sessions confirm/extend this set in lockstep with their extractors (R3 = Elo).
+_CRITICAL_FEATURE_KEYS: frozenset[str] = frozenset(
+    {
+        "elo_diff_blended",
+        "p1_elo_pre",
+        "p2_elo_pre",
+        "p1_elo_surface_pre",
+        "p2_elo_surface_pre",
+        "p1_elo_blended_pre",
+        "p2_elo_blended_pre",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _RowRef:
     """Compact reference to a row used in violation messages."""

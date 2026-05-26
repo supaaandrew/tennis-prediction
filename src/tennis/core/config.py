@@ -380,7 +380,9 @@ class ModelingSection(_Section):
 
 
 class DecisionTimingSection(_Section):
-    live_decision_offset_hours: int = 24
+    # Must be positive: a zero/negative live offset makes pit_cut emit
+    # as_of_ts >= start_ts (a lookahead). Fail at config load, not mid-run.
+    live_decision_offset_hours: int = Field(default=24, gt=0)
     backtest_use_closing_line: bool = True
 
 
