@@ -138,6 +138,9 @@ class _FakeStatRepo:
     def list_for_match(self, match_id):
         return []
 
+    def list_for_player(self, *, player_id, match_ids):
+        return {}
+
     def upsert(self, row):
         return row
 

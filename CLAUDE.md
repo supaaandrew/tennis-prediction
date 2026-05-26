@@ -32,7 +32,7 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ R5a               Serve/return + Surface extractors — features/{serve_return,surface}.py, "serve_return"(15)/"surface"(7) families in specs registry, §M13-M14, 832 tests (post-review)
 ✅ R5b               Conditions (weather + venue) extractor — features/conditions.py, "conditions"(9) base family in specs registry, §M15, 871 tests (post-review). §M3 wind_serve_risk/altitude_serve_boost interactions DEFERRED (config curves + cross-family serve profile)
 ✅ R6a               ResearchAgent orchestrator — agents/research/agent.py (mode ctor flag, §M4 factory registry, FeatureContext build, validate→write, §M12 guard@ctor) + EloSnapshotRepository.career_match_counts() + pipeline precondition gate/exception safety net, §M16/§M17/§L12, 892 tests (post-review)
-⬜ R6b               Serve/return bulk match_stats read (retire §M14 N+1) + query-count perf guard
+✅ R6b               Serve/return bulk match_stats read — MatchStatRepository.list_for_player (Protocol+impl, bulk dual of get) retires the §M14 N+1; ServeReturnExtractor fetches 1 bulk read/player; §M18, 897 tests (post-review). Codex M1 fixed (repo wraps SQLAlchemyError→StorageError; extractor narrows to StorageError so real bugs propagate loudly), M2 deferred (no bulk_read_failures metric — Monitor-agent owned)
 ⬜ R7                Fatigue + Market signals extractors (plugs into R6a §M4 factory registry)
 ⬜ Modeling Agent    stacking ensemble, calibration, edge
 ⬜ Briefing Agent    Claude API, RAG, email
@@ -172,16 +172,17 @@ Match src/tennis/core/ style exactly:
   (publish/vintage timestamp) — deferred, mirrors the §M11 date-granular-rank
   precedent. (The naive-`start_ts` and band-shape guards from Codex R5b are
   already fixed in `conditions.py`.)
-- **Serve/return N+1 (Codex R5a, HIGH, deferred to R6, §M14):**
-  `ServeReturnExtractor` issues one `MatchStatRepository.get(match_id,
-  player_id)` per prior match per player (the spec-prescribed "N
-  lookups, like H2H surface"). R6 ResearchAgent wiring must add a bulk
-  prefetch (e.g. `MatchStatRepository.list_for_player_before` or a
-  batch read) + a query-count perf-guard test before production-sized
-  histories push extraction past heartbeat/orphan thresholds. The
-  surface extractor already memoizes `tournament_id→surface` in-process;
-  serve stats are unique per `(match_id, player_id)` so they need a
-  storage-layer batch method, not an in-extractor cache.
+- **Serve/return N+1 — ✅ RESOLVED in R6b (§M18):** `ServeReturnExtractor`
+  no longer issues one `MatchStatRepository.get` per prior match per
+  player. R6b added `MatchStatRepository.list_for_player(*, player_id,
+  match_ids) -> Mapping[int, MatchStatRow]` (the bulk dual of `get`:
+  empty-`match_ids` `{}` fast-path, single IN-list, match_id-keyed, no
+  chunking v1) and rewired `_aggregates` to ONE bulk read per player
+  (2 reads/feature row, perf-guard-tested). A `StorageError` degrades to
+  NULL (§M8); a non-`StorageError` bug propagates to the agent dead-letter.
+  Still OPEN (Codex R6b M2, deferred): no run-level `bulk_read_failures`
+  metric in `AgentResult.metrics` — the per-failure structured warning is
+  the v1 observability hook; the future Monitor agent owns the metric/alert.
 
 ---
 

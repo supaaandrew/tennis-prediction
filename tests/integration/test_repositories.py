@@ -821,3 +821,80 @@ class TestEloCareerMatchCounts:
         ghost = _seed_player(players, source_uid="eloGhost")
         counts = EloSnapshotRepositoryImpl(session_factory).career_match_counts()
         assert ghost.player_id not in counts
+
+
+# ---------------------------------------------------------------------------
+# MatchStatRepository.list_for_player() — the §M18 bulk serve/return read
+# (retires the §M14 per-match get() N+1)
+# ---------------------------------------------------------------------------
+class TestMatchStatListForPlayer:
+    def test_bulk_read_filters_by_player_and_keys_by_match(
+        self, session_factory: Any
+    ) -> None:
+        from tennis.storage.postgres.impl import (
+            MatchRepositoryImpl,
+            MatchStatRepositoryImpl,
+            PlayerRepositoryImpl,
+            TournamentRepositoryImpl,
+            VenueRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import MatchStatRow
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches = MatchRepositoryImpl(session_factory)
+        stats = MatchStatRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="StatBulkCity", country="SBK")
+        t = _seed_tournament(tournaments, slug="stat-bulk", venue_id=v.venue_id)
+        target = _seed_player(players, source_uid="sbTarget")
+        opp = _seed_player(players, source_uid="sbOpp")
+
+        # Three matches target-vs-opp. target has a stat row in m1 and m2 (NOT m3);
+        # opp has a stat row in m1 (the decoy that the player filter must exclude).
+        match_ids = []
+        for i, rnd in enumerate(["R32", "R16", "QF"]):
+            mr = _seed_match(
+                matches, tournament_id=t.tournament_id,
+                p1_id=target.player_id, p2_id=opp.player_id,
+                round=rnd, match_date=date(2026, 3, 1 + i),
+                status="final", source_uid=f"sb-{rnd}",
+            )
+            match_ids.append(mr.match_id)
+        m1, m2, m3 = match_ids
+
+        stats.upsert(MatchStatRow(
+            match_id=m1, player_id=target.player_id, is_winner=True, serve_pts=80,
+        ))
+        stats.upsert(MatchStatRow(
+            match_id=m2, player_id=target.player_id, is_winner=False, serve_pts=70,
+        ))
+        # Decoy: same match m1, DIFFERENT player — must not appear in target's map.
+        stats.upsert(MatchStatRow(
+            match_id=m1, player_id=opp.player_id, is_winner=False, serve_pts=99,
+        ))
+
+        result = stats.list_for_player(
+            player_id=target.player_id, match_ids=[m1, m2, m3]
+        )
+
+        # Keyed by match_id; m3 absent (no row); opp's m1 row excluded (player filter).
+        assert set(result) == {m1, m2}
+        assert all(row.player_id == target.player_id for row in result.values())
+        assert result[m1].serve_pts == 80
+        assert result[m2].serve_pts == 70
+
+    def test_empty_match_ids_returns_empty_no_query(
+        self, session_factory: Any
+    ) -> None:
+        from tennis.storage.postgres.impl import (
+            MatchStatRepositoryImpl,
+            PlayerRepositoryImpl,
+        )
+
+        # Empty fast-path (contract): returns {} without touching the DB.
+        players = PlayerRepositoryImpl(session_factory)
+        p = _seed_player(players, source_uid="sbEmpty")
+        stats = MatchStatRepositoryImpl(session_factory)
+        assert stats.list_for_player(player_id=p.player_id, match_ids=[]) == {}

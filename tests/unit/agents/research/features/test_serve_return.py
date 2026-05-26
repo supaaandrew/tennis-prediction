@@ -13,11 +13,13 @@ All in-memory; no Docker.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from tennis.agents.research.context import FeatureContext, MatchHistoryIndex
 from tennis.agents.research.features.base import FeatureExtractor
@@ -30,6 +32,7 @@ from tennis.agents.research.features.serve_return import (
 )
 from tennis.agents.research.specs import _REGISTRY
 from tennis.core.config import AppConfig, load_config
+from tennis.core.errors import StorageError
 from tennis.storage.postgres.rows import MatchRow, MatchStatRow
 
 _AS_OF = datetime(2024, 1, 1, tzinfo=UTC)
@@ -58,16 +61,64 @@ def config() -> AppConfig:
 
 
 class _FakeStatRepo:
-    """In-memory MatchStatRepository keyed on (match_id, player_id)."""
+    """In-memory MatchStatRepository keyed on (match_id, player_id).
+
+    `bulk_calls` counts `list_for_player` invocations — the perf guard asserts the
+    extractor makes exactly one bulk read per player (§M18), never an N+1 fanout."""
 
     def __init__(self) -> None:
         self._store: dict[tuple[int, int], MatchStatRow] = {}
+        self.bulk_calls = 0
 
     def add(self, stat: MatchStatRow) -> None:
         self._store[(stat.match_id, stat.player_id)] = stat
 
     def get(self, *, match_id: int, player_id: int) -> MatchStatRow | None:
         return self._store.get((match_id, player_id))
+
+    def list_for_player(
+        self, *, player_id: int, match_ids: Sequence[int]
+    ) -> dict[int, MatchStatRow]:
+        # Mirror the impl's empty fast-path (no "query" on empty input): don't count
+        # it as a bulk read so the perf guard reflects real DB round-trips only.
+        if not match_ids:
+            return {}
+        self.bulk_calls += 1
+        return {
+            mid: self._store[(mid, player_id)]
+            for mid in match_ids
+            if (mid, player_id) in self._store
+        }
+
+
+# A credential-bearing failure message proves the §L10 redaction is actually
+# applied (a plain message would be unchanged by redact_text → proves nothing).
+_SECRET_DSN = "postgresql://svc:hunter2@db:5432/tennis"
+
+
+class _RaisingStatRepo(_FakeStatRepo):
+    """A repo whose bulk read fails with the repo's TYPED `StorageError` —
+    exercises the §M8/§M18 extractor-side error→NULL degrade (the failure must not
+    propagate out of `extract`). The message carries a credential so the redaction
+    assertion is meaningful."""
+
+    def list_for_player(
+        self, *, player_id: int, match_ids: Sequence[int]
+    ) -> dict[int, MatchStatRow]:
+        self.bulk_calls += 1
+        raise StorageError(f"connect failed: {_SECRET_DSN}")
+
+
+class _BuggyStatRepo(_FakeStatRepo):
+    """A repo whose bulk read raises a NON-storage error (a stand-in for a genuine
+    programming defect). The extractor must NOT swallow this (Codex R6b M1) — it
+    propagates so the agent's per-match isolation dead-letters it loudly."""
+
+    def list_for_player(
+        self, *, player_id: int, match_ids: Sequence[int]
+    ) -> dict[int, MatchStatRow]:
+        self.bulk_calls += 1
+        raise TypeError("genuine bug, not a DB failure")
 
 
 def _match(match_id: int, player_id: int, days_ago: int) -> MatchRow:
@@ -119,16 +170,18 @@ def _fctx() -> FeatureContext:
     )
 
 
-def _build(
+def _build_with_repo(
     config: AppConfig,
     *,
     p1: list[tuple[int, dict[str, Any] | None]] | None = None,
     p2: list[tuple[int, dict[str, Any] | None]] | None = None,
-) -> ServeReturnExtractor:
-    """Build the extractor from per-player `(days_ago, stat_overrides)` entries.
-    A `None` stat means the match has no `match_stats` row (repo returns None)."""
+    repo: _FakeStatRepo | None = None,
+) -> tuple[ServeReturnExtractor, _FakeStatRepo]:
+    """Build `(extractor, repo)` from per-player `(days_ago, stat_overrides)` entries.
+    A `None` stat means the match has no `match_stats` row (absent from the bulk map).
+    Pass `repo` to inject a variant (e.g. a failing one)."""
     matches: list[MatchRow] = []
-    repo = _FakeStatRepo()
+    repo = repo if repo is not None else _FakeStatRepo()
     mid = 0
     for entries, pid in ((p1 or [], _P1), (p2 or [], _P2)):
         for days_ago, overrides in entries:
@@ -136,11 +189,23 @@ def _build(
             matches.append(_match(mid, pid, days_ago))
             if overrides is not None:
                 repo.add(_stat(mid, pid, **overrides))
-    return ServeReturnExtractor(
+    extractor = ServeReturnExtractor(
         history=MatchHistoryIndex.build(matches),
         stat_repo=repo,
         config=config,
     )
+    return extractor, repo
+
+
+def _build(
+    config: AppConfig,
+    *,
+    p1: list[tuple[int, dict[str, Any] | None]] | None = None,
+    p2: list[tuple[int, dict[str, Any] | None]] | None = None,
+) -> ServeReturnExtractor:
+    """Build the extractor from per-player `(days_ago, stat_overrides)` entries."""
+    extractor, _ = _build_with_repo(config, p1=p1, p2=p2)
+    return extractor
 
 
 def _entries(n: int, *, start_day: int = 10, **overrides: Any) -> list[tuple[int, dict[str, Any]]]:
@@ -302,3 +367,59 @@ class TestServeDominanceDiff:
         out = _build(config, p1=_entries(10), p2=_entries(5)).extract(_fctx())
         assert out["p2_first_serve_win_pct_365d"] is None
         assert out["serve_dominance_diff_365d"] is None
+
+
+class TestServeReturnBulkRead:
+    """R6b/§M18: the per-match `get` N+1 is retired in favor of one bulk
+    `list_for_player` read per player."""
+
+    def test_one_bulk_query_per_player(self, config: AppConfig) -> None:
+        # 50 priors each (≫ the 10-sample min) — the call count must stay 2 (one
+        # per player), independent of history depth. This is the N+1 regression.
+        ex, repo = _build_with_repo(config, p1=_entries(50), p2=_entries(50))
+        ex.extract(_fctx())
+        assert repo.bulk_calls == 2
+
+    def test_empty_history_no_db_call(self, config: AppConfig) -> None:
+        # Neither player has any prior match → the extractor passes empty match_ids,
+        # the empty fast-path short-circuits with NO DB round-trip (bulk_calls stays
+        # 0), and every key NULLs out.
+        ex, repo = _build_with_repo(config)
+        out = ex.extract(_fctx())
+        assert repo.bulk_calls == 0
+        assert all(out[k] is None for k in SERVE_RETURN_FEATURE_KEYS)
+
+    def test_storage_error_yields_null_not_raise(self, config: AppConfig) -> None:
+        # A StorageError (the repo's typed DB/IO failure) is swallowed in the
+        # extractor (§M8/§M18): all keys NULL, extract() returns normally.
+        ex, repo = _build_with_repo(
+            config, p1=_entries(15), p2=_entries(15), repo=_RaisingStatRepo()
+        )
+        out = ex.extract(_fctx())
+        assert isinstance(repo, _RaisingStatRepo)
+        assert all(out[k] is None for k in SERVE_RETURN_FEATURE_KEYS)
+
+    def test_storage_error_logs_redacted_warning(self, config: AppConfig) -> None:
+        # The degrade path must be observable (not silent) AND must redact the
+        # cause per §L10 — a secret in the failure message is masked in the log.
+        ex, _ = _build_with_repo(
+            config, p1=_entries(15), p2=_entries(15), repo=_RaisingStatRepo()
+        )
+        with capture_logs() as logs:
+            ex.extract(_fctx())
+        events = [e for e in logs if e["event"] == "serve_return_bulk_read_failed"]
+        assert events, "expected a serve_return_bulk_read_failed warning"
+        cause = events[0]["cause"]
+        assert "StorageError" in cause          # type preserved
+        assert "hunter2" not in cause            # secret redacted (§L10)
+        assert "***" in cause                    # redaction marker present
+
+    def test_non_storage_error_propagates(self, config: AppConfig) -> None:
+        # Codex R6b M1: a genuine programming defect (NOT a StorageError) must NOT
+        # be masked as missing data — it propagates so the agent's per-match
+        # isolation dead-letters it loudly.
+        ex, _ = _build_with_repo(
+            config, p1=_entries(15), p2=_entries(15), repo=_BuggyStatRepo()
+        )
+        with pytest.raises(TypeError):
+            ex.extract(_fctx())

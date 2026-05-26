@@ -35,10 +35,10 @@ from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from tennis.core.errors import IdempotencyError
+from tennis.core.errors import IdempotencyError, StorageError
 from tennis.core.logging import get_logger
 from tennis.storage.postgres import models as m
 from tennis.storage.postgres.rows import (
@@ -579,6 +579,36 @@ class MatchStatRepositoryImpl:
                 select(m.MatchStat).where(m.MatchStat.match_id == match_id)
             ).scalars().all()
             return [_orm_to_row(o, MatchStatRow) for o in rows]
+
+    def list_for_player(
+        self, *, player_id: int, match_ids: Sequence[int]
+    ) -> Mapping[int, MatchStatRow]:
+        """All of `player_id`'s match_stats among `match_ids`, keyed by match_id.
+
+        The bulk dual of `get` (R6b, §M18): the serve/return extractor fetches a
+        player's whole prior-match stat set in ONE query instead of N per-match
+        `get` calls (retires the §M14 N+1). `(match_id, player_id)` is the PK and we
+        filter on a single `player_id`, so each match_id maps to exactly one row.
+        """
+        # Empty fast-path: no DB round-trip on empty input (contract).
+        if not match_ids:
+            return {}
+        # No IN-list chunking (v1): a player's full career (~2000 ids) is well within
+        # Postgres IN-list limits; documented accepted limitation (§M18).
+        # A DB/IO failure is raised as a TYPED StorageError (not a raw SQLAlchemy
+        # error) so the serve/return extractor's degrade path can catch exactly the
+        # intended failure class and let genuine bugs propagate loudly (§M18).
+        try:
+            with self._sf() as s:
+                rows = s.execute(
+                    select(m.MatchStat).where(
+                        m.MatchStat.player_id == player_id,
+                        m.MatchStat.match_id.in_(tuple(match_ids)),
+                    )
+                ).scalars().all()
+                return {o.match_id: _orm_to_row(o, MatchStatRow) for o in rows}
+        except SQLAlchemyError as exc:
+            raise StorageError("MatchStat.list_for_player query failed") from exc
 
     def upsert(self, row: MatchStatRow) -> MatchStatRow:
         values = _row_to_dict(row, drop_none_for=_SERVER_MANAGED)

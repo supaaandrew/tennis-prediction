@@ -878,3 +878,40 @@ activation + exception safety net — the two Codex fixes).
 (`MatchStatRepository.list_for_player_before` / batch; new Protocol + impl +
 Docker-gated tests) wired into `ServeReturnExtractor`, plus a query-count
 perf-guard test. Then R7 = fatigue + market (append to the R6a §M4 registry).
+
+## Session 2026-05-26 — R6b: serve/return bulk match_stats read (retire §M14 N+1)
+**Prompt:** Implement R6b in plan mode after confirming four locked clarifications
+(mirror `list_for_match` query style; empty `match_ids` → `{}` fast-path with no DB
+call; no IN-list chunking v1; bulk-read DB error → all-stats-absent `{}`, swallowed
+extractor-side). Retire the §M14 serve/return N+1 with a bulk read + perf guard.
+**Shipped:** New `MatchStatRepository.list_for_player(*, player_id, match_ids) ->
+Mapping[int, MatchStatRow]` (Protocol in `repositories.py` + `MatchStatRepositoryImpl`
+in `impl.py`) — the bulk dual of `get`: empty-`match_ids` `{}` fast-path (no DB
+round-trip), single IN-list, match_id-keyed result, no chunking (v1). Rewired
+`ServeReturnExtractor._aggregates` to ONE bulk read per player via a new `_stats_for`
+helper (was one `get` per prior match per player); §M14 aggregation semantics
+byte-identical. PIT unchanged (match_ids come from the §M6 `MatchHistoryIndex`, the
+single PIT source — no `as_of` filter in SQL). No new files (5 modified). Tests
+**892 → 897 (+5 unit)**: perf guard (constant 2 reads regardless of history depth),
+empty-history no-DB-call, `StorageError`→NULL, redacted-warning emission,
+non-`StorageError`-propagates; +2 Docker-gated integration (player-filter exclusion,
+match-keying, empty fast-path). `test_agent.py` fake gained `list_for_player`.
+**Auto-review (RUN REVIEW):** ✅ 0 CRITICAL / 0 HIGH.
+**Codex findings:** 0 CRITICAL / 0 HIGH / 2 MEDIUM / 1 LOW, all triaged.
+**M1 (MEDIUM) FIXED** — the extractor's bare `except Exception` masked non-DB bugs
+(TypeError/AttributeError) as NULL features; narrowed `_stats_for` to `except
+StorageError` and made `list_for_player` wrap `SQLAlchemyError`→typed `StorageError`,
+so a genuine defect propagates to the agent's per-match isolation → loud dead-letter →
+`partial`, while real DB outages still degrade to NULL (§M8). **L1 (LOW) FIXED** —
+added a `structlog.testing.capture_logs` test asserting the `serve_return_bulk_read_failed`
+warning fires AND the cause is `redact_text`-scrubbed (§L10; uses a credential-bearing
+DSN so redaction is actually exercised). **M2 (MEDIUM) DEFERRED** (user-approved) — no
+run-level `bulk_read_failures` counter in `AgentResult.metrics`; the structured warning
+is the v1 observability hook and the future Monitor agent owns the metric (documented
+in §M18). The prompt pre-declared the error→NULL behavior delta, no-chunking, and
+empty-fast-path as intentional so Codex evaluated their consistency, not as regressions.
+**New locked decisions:** M18 (serve/return bulk `list_for_player` — per-player
+match_ids design, empty fast-path, no chunking v1, repo-typed-`StorageError` +
+extractor-narrowed degrade, intentional behavior delta from §M14, M2 metric deferral).
+**Next:** R7 — fatigue + market-signal extractors, appended to the R6a §M4
+extractor-factory registry (additive, no `agent.py` change).
