@@ -49,14 +49,17 @@ def _form_rows() -> tuple[FeatureSpecRow, ...]:
     return tuple(rows)
 
 
-# R3 landed the first family ("elo"); R4 appends "rankings", "form", "h2h" in
-# lockstep with their extractors (R5/R7 append theirs later). Each family's
-# extractor `feature_keys()` MUST equal its seeded rows here — guarded by the
-# per-family round-trip tests under `tests/unit/agents/research/features/`. The 9
-# Elo keys mirror §15.5 (the 7 base ratings are the §M8 critical keys; the two
-# reliability booleans are non-critical). The Rankings family is NEW to §15.5
-# (§M11); Form/H2H mirror their §15.5 rows (H2H-advanced reconciled to §M1). All
-# of R4's keys are non-critical (§0.5/§M8) — none enters `_CRITICAL_FEATURE_KEYS`.
+# R3 landed the first family ("elo"); R4 appends "rankings", "form", "h2h";
+# R5a appends "surface", "serve_return" — all in lockstep with their extractors
+# (conditions + R7 families append theirs later). Each family's extractor
+# `feature_keys()` MUST equal its seeded rows here — guarded by the per-family
+# round-trip tests under `tests/unit/agents/research/features/`. The 9 Elo keys
+# mirror §15.5 (the 7 base ratings are the §M8 critical keys; the two reliability
+# booleans are non-critical). The Rankings family is NEW to §15.5 (§M11); Form/H2H
+# mirror their §15.5 rows (H2H-advanced reconciled to §M1). Surface mirrors the
+# locked 7-key §15.5 catalog (transition keys reconciled in §M13); serve_return
+# mirrors its 15 §15.5 rows (§M14). All of R4/R5a's keys are non-critical
+# (§0.5/§M8) — none enters `_CRITICAL_FEATURE_KEYS`.
 _REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {
     "elo": (
         FeatureSpecRow("p1_elo_pre", 1, "float"),
@@ -85,6 +88,32 @@ _REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {
         FeatureSpecRow("h2h_surface_p1_win_rate", 1, "float"),
         FeatureSpecRow("h2h_win_rate_confidence", 1, "float"),
         FeatureSpecRow("h2h_win_rate_weighted", 1, "float"),
+    ),
+    "surface": (
+        FeatureSpecRow("p1_career_win_rate_surface", 1, "float"),
+        FeatureSpecRow("p2_career_win_rate_surface", 1, "float"),
+        FeatureSpecRow("p1_recent_win_rate_surface_365d", 1, "float"),
+        FeatureSpecRow("p2_recent_win_rate_surface_365d", 1, "float"),
+        FeatureSpecRow("surface_affinity_diff", 1, "float"),
+        FeatureSpecRow("surface_transition_type", 1, "cat"),
+        FeatureSpecRow("surface_transition_exposure", 1, "float"),
+    ),
+    "serve_return": (
+        FeatureSpecRow("p1_first_serve_pct_career", 1, "float"),
+        FeatureSpecRow("p2_first_serve_pct_career", 1, "float"),
+        FeatureSpecRow("p1_first_serve_pct_365d", 1, "float"),
+        FeatureSpecRow("p2_first_serve_pct_365d", 1, "float"),
+        FeatureSpecRow("p1_first_serve_win_pct_365d", 1, "float"),
+        FeatureSpecRow("p2_first_serve_win_pct_365d", 1, "float"),
+        FeatureSpecRow("p1_second_serve_win_pct_365d", 1, "float"),
+        FeatureSpecRow("p2_second_serve_win_pct_365d", 1, "float"),
+        FeatureSpecRow("p1_ace_rate_365d", 1, "float"),
+        FeatureSpecRow("p2_ace_rate_365d", 1, "float"),
+        FeatureSpecRow("p1_df_rate_365d", 1, "float"),
+        FeatureSpecRow("p2_df_rate_365d", 1, "float"),
+        FeatureSpecRow("p1_bp_save_pct_365d", 1, "float"),
+        FeatureSpecRow("p2_bp_save_pct_365d", 1, "float"),
+        FeatureSpecRow("serve_dominance_diff_365d", 1, "float"),
     ),
 }
 

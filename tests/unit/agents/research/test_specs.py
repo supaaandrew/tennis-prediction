@@ -216,8 +216,16 @@ class TestProductionRegistry:
         assert "p1_elo_reliability_low" not in _CRITICAL_FEATURE_KEYS
 
     def test_r4_families_registered(self) -> None:
-        # R4 appends rankings/form/h2h in lockstep with their extractors.
-        assert set(_REGISTRY) == {"elo", "rankings", "form", "h2h"}
+        # R4 appended rankings/form/h2h; R5a adds surface/serve_return — all in
+        # lockstep with their extractors.
+        assert set(_REGISTRY) == {
+            "elo",
+            "rankings",
+            "form",
+            "h2h",
+            "surface",
+            "serve_return",
+        }
         assert {row.feature_key for row in _REGISTRY["rankings"]} == {
             "p1_rank_pre",
             "p2_rank_pre",
@@ -237,11 +245,47 @@ class TestProductionRegistry:
         # Form = 5 windows × (2 win_rate + 2 matches_played + 1 diff) = 25 rows.
         assert len(_REGISTRY["form"]) == 25
 
-    def test_r4_families_round_trip_and_non_critical(self) -> None:
+    def test_r5a_families_registered(self) -> None:
+        # R5a: surface = the locked 7-key §15.5 catalog (transition keys are
+        # single, p1-perspective per §M13); serve_return = its 15 §15.5 rows.
+        assert {row.feature_key for row in _REGISTRY["surface"]} == {
+            "p1_career_win_rate_surface",
+            "p2_career_win_rate_surface",
+            "p1_recent_win_rate_surface_365d",
+            "p2_recent_win_rate_surface_365d",
+            "surface_affinity_diff",
+            "surface_transition_type",
+            "surface_transition_exposure",
+        }
+        assert len(_REGISTRY["surface"]) == 7
+        assert {row.feature_key for row in _REGISTRY["serve_return"]} == {
+            "p1_first_serve_pct_career",
+            "p2_first_serve_pct_career",
+            "p1_first_serve_pct_365d",
+            "p2_first_serve_pct_365d",
+            "p1_first_serve_win_pct_365d",
+            "p2_first_serve_win_pct_365d",
+            "p1_second_serve_win_pct_365d",
+            "p2_second_serve_win_pct_365d",
+            "p1_ace_rate_365d",
+            "p2_ace_rate_365d",
+            "p1_df_rate_365d",
+            "p2_df_rate_365d",
+            "p1_bp_save_pct_365d",
+            "p2_bp_save_pct_365d",
+            "serve_dominance_diff_365d",
+        }
+        assert len(_REGISTRY["serve_return"]) == 15
+        # The single transition keys carry the documented dtypes (cat/float).
+        by_key = {row.feature_key: row for row in _REGISTRY["surface"]}
+        assert by_key["surface_transition_type"].dtype == "cat"
+        assert by_key["surface_transition_exposure"].dtype == "float"
+
+    def test_r4_r5a_families_round_trip_and_non_critical(self) -> None:
         # Seed + build against the PRODUCTION registry: every registered key must
-        # round-trip, and none of the R4 families may be critical (§0.5/§M8).
+        # round-trip, and none of the R4/R5a families may be critical (§0.5/§M8).
         repo = _FakeFeatureSpecRepo()
-        families = ["rankings", "form", "h2h"]
+        families = ["rankings", "form", "h2h", "surface", "serve_return"]
         seed_feature_specs(repo, families=families)
         specs = build_expected_specs(repo, feature_set="v1", families=families)
 

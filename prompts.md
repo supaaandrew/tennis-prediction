@@ -773,3 +773,33 @@ limitation), M12 (R4 §15.5-prose reconciliations: Form threshold=`elo_form`;
 `match_stats` / prior matches via the R2 `MatchHistoryIndex`. R6 then lands the
 `ResearchAgent` orchestrator and MUST add the §M12 / carry-forward startup invariant
 (`config.features.windows_days` == seeded Form catalog). R7 = fatigue + market.
+
+## Session 2026-05-26 — R5a: Serve/return + Surface extractors
+**Prompt:** Build the R5 serve/return + surface + conditions families; SPLIT per
+the spec budget flag → serve/return + surface this session (R5a), conditions +
+§M3 interactions deferred to R5b.
+**Shipped:** `agents/research/features/serve_return.py` (`ServeReturnExtractor`,
+15 §15.5 keys — career + 365d `match_stats` aggregates), `agents/research/features/
+surface.py` (`SurfaceExtractor`, 7 §15.5 keys — affinity + §M2 transition),
+matching `tests/unit/agents/research/features/test_{serve_return,surface}.py`;
+`specs.py` registry += `"serve_return"`(15) / `"surface"`(7) in §M7 lockstep;
+`test_specs.py` extended to the 6-family set. Tests **782 → 832 (+50)**, ~5s, no
+Docker.
+**Auto-review (RUN REVIEW):** 0 CRITICAL. Fixed M2 (negative second-serve
+denominator on corrupt `first_in>serve_pts` row → exclude it) + M1 (redundant
+per-player history pass → single pass).
+**Codex findings:** 0 CRITICAL / 1 HIGH / 1 MEDIUM, all triaged.
+(1) MEDIUM — surface re-queries same `tournament_id` across passes: VALID + cheap
+→ instance-level `tournament_id→surface` memo + bounded-call regression test.
+(2) HIGH — serve/return issues one `MatchStatRepository.get` per prior match (N+1):
+PARTIALLY VALID → it is the spec-prescribed "N lookups, like H2H surface" pattern
+and a real fix needs a bulk storage method (out of R5a extractor-only scope);
+DEFERRED to R6 with a documented carry-forward (§M14) + perf-guard test.
+**New locked decisions:** M13 (Surface family — single p1-perspective transition
+keys, longest-window `log1p` exposure, unresolved-prev NULL ≠ debut "none",
+tournament-surface memo), M14 (Serve/return — sample gate, paired-presence
+summation, zero/corrupt-denominator NULL, N+1 deferred to R6).
+**Next:** R5b — `features.conditions` (weather) extractor + §M3
+`wind_serve_risk`/`altitude_serve_boost` interactions (need new config curves +
+cross-family serve profile). Then R6 ResearchAgent orchestrator (§M12 windows
+guard + §M14 bulk-stats prefetch). R7 = fatigue + market.

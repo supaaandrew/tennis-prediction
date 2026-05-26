@@ -29,7 +29,9 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ R2                Research foundation — point_in_time (pit_cut), context (FeatureContext/MatchHistoryIndex), features/base Protocol, specs seeding, §M5-M8, 660 tests
 ✅ R3                Elo extractor — features/elo.py (EloWalk chronological build + EloExtractor + helpers), first "elo" family in specs registry, §M9-M10, 719 tests (post-review)
 ✅ R4                Rankings + Form + H2H extractors — features/{rankings,form,h2h}.py, "rankings"/"form"/"h2h" families in specs registry, §M11-M12, 782 tests (post-review)
-⬜ R5-R6             Research extractors (R5 serve/return + surface affinity + conditions/weather) + R6 ResearchAgent orchestrator (agents/research/agent.py)
+✅ R5a               Serve/return + Surface extractors — features/{serve_return,surface}.py, "serve_return"(15)/"surface"(7) families in specs registry, §M13-M14, 832 tests (post-review)
+⬜ R5b               Conditions (weather) extractor — features/conditions.py + §M3 wind_serve_risk/altitude_serve_boost interactions (split out of R5 per budget)
+⬜ R6                ResearchAgent orchestrator (agents/research/agent.py) — extractor registry wiring + §M12 windows_days startup guard + §M14 bulk-stats prefetch/perf guard
 ⬜ R7                Fatigue + Market signals extractors (plugs into R6 registry)
 ⬜ Modeling Agent    stacking ensemble, calibration, edge
 ⬜ Briefing Agent    Claude API, RAG, email
@@ -152,6 +154,27 @@ Match src/tennis/core/ style exactly:
   ResearchAgent wiring asserting `config.features.windows_days` matches
   the seeded form catalog (raise `FeatureContractError` before
   extraction). No runtime home exists in R4 (no agent yet).
+
+## Carry-forward from R5a
+- **R5b (next):** the `conditions` (weather) family + the §M3
+  `wind_serve_risk`/`altitude_serve_boost` interactions were split out
+  of R5 per the budget flag. R5b builds `features/conditions.py`
+  (`WeatherObservationRepository.nearest_at_or_before(source="owm",
+  max_age_hours=config.features.weather.max_obs_age_hours=3)`, venue
+  `altitude_m` + tournament `indoor`, `forecast_uncertainty_bucket`
+  from `uncertainty_bucket_thresholds`; C9 missing-venue → all-NULL row
+  still written). The two §M3 interactions need NEW config curves AND a
+  cross-family serve profile — a design decision deferred to R5b.
+- **Serve/return N+1 (Codex R5a, HIGH, deferred to R6, §M14):**
+  `ServeReturnExtractor` issues one `MatchStatRepository.get(match_id,
+  player_id)` per prior match per player (the spec-prescribed "N
+  lookups, like H2H surface"). R6 ResearchAgent wiring must add a bulk
+  prefetch (e.g. `MatchStatRepository.list_for_player_before` or a
+  batch read) + a query-count perf-guard test before production-sized
+  histories push extraction past heartbeat/orphan thresholds. The
+  surface extractor already memoizes `tournament_id→surface` in-process;
+  serve stats are unique per `(match_id, player_id)` so they need a
+  storage-layer batch method, not an in-extractor cache.
 
 ---
 
