@@ -216,8 +216,8 @@ class TestProductionRegistry:
         assert "p1_elo_reliability_low" not in _CRITICAL_FEATURE_KEYS
 
     def test_r4_families_registered(self) -> None:
-        # R4 appended rankings/form/h2h; R5a adds surface/serve_return — all in
-        # lockstep with their extractors.
+        # R4 appended rankings/form/h2h; R5a adds surface/serve_return; R5b adds
+        # conditions — all in lockstep with their extractors.
         assert set(_REGISTRY) == {
             "elo",
             "rankings",
@@ -225,6 +225,7 @@ class TestProductionRegistry:
             "h2h",
             "surface",
             "serve_return",
+            "conditions",
         }
         assert {row.feature_key for row in _REGISTRY["rankings"]} == {
             "p1_rank_pre",
@@ -281,11 +282,46 @@ class TestProductionRegistry:
         assert by_key["surface_transition_type"].dtype == "cat"
         assert by_key["surface_transition_exposure"].dtype == "float"
 
-    def test_r4_r5a_families_round_trip_and_non_critical(self) -> None:
+    def test_r5b_conditions_family_registered(self) -> None:
+        # R5b: conditions = the 9 BASE §15.5 keys (the two §M3 interaction keys
+        # wind_serve_risk/altitude_serve_boost are DEFERRED — not in the registry).
+        assert {row.feature_key for row in _REGISTRY["conditions"]} == {
+            "temp_c_decision",
+            "humidity_pct_decision",
+            "wind_speed_ms_decision",
+            "wind_dir_deg_decision",
+            "precip_mm_decision",
+            "cloud_pct_decision",
+            "altitude_m",
+            "indoor",
+            "forecast_uncertainty_bucket",
+        }
+        assert len(_REGISTRY["conditions"]) == 9
+        keys = {row.feature_key for row in _REGISTRY["conditions"]}
+        assert "wind_serve_risk" not in keys
+        assert "altitude_serve_boost" not in keys
+        # The catalog dtypes: ints (direction/cloud/altitude), bool, and the cat.
+        by_key = {row.feature_key: row for row in _REGISTRY["conditions"]}
+        assert by_key["wind_dir_deg_decision"].dtype == "int"
+        assert by_key["cloud_pct_decision"].dtype == "int"
+        assert by_key["altitude_m"].dtype == "int"
+        assert by_key["indoor"].dtype == "bool"
+        assert by_key["forecast_uncertainty_bucket"].dtype == "cat"
+        assert by_key["temp_c_decision"].dtype == "float"
+
+    def test_r4_r5a_r5b_families_round_trip_and_non_critical(self) -> None:
         # Seed + build against the PRODUCTION registry: every registered key must
-        # round-trip, and none of the R4/R5a families may be critical (§0.5/§M8).
+        # round-trip, and none of the R4/R5a/R5b families may be critical
+        # (§0.5/§M8 — every conditions key is legitimately nullable).
         repo = _FakeFeatureSpecRepo()
-        families = ["rankings", "form", "h2h", "surface", "serve_return"]
+        families = [
+            "rankings",
+            "form",
+            "h2h",
+            "surface",
+            "serve_return",
+            "conditions",
+        ]
         seed_feature_specs(repo, families=families)
         specs = build_expected_specs(repo, feature_set="v1", families=families)
 

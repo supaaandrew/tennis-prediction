@@ -30,7 +30,7 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ R3                Elo extractor — features/elo.py (EloWalk chronological build + EloExtractor + helpers), first "elo" family in specs registry, §M9-M10, 719 tests (post-review)
 ✅ R4                Rankings + Form + H2H extractors — features/{rankings,form,h2h}.py, "rankings"/"form"/"h2h" families in specs registry, §M11-M12, 782 tests (post-review)
 ✅ R5a               Serve/return + Surface extractors — features/{serve_return,surface}.py, "serve_return"(15)/"surface"(7) families in specs registry, §M13-M14, 832 tests (post-review)
-⬜ R5b               Conditions (weather) extractor — features/conditions.py + §M3 wind_serve_risk/altitude_serve_boost interactions (split out of R5 per budget)
+✅ R5b               Conditions (weather + venue) extractor — features/conditions.py, "conditions"(9) base family in specs registry, §M15, 871 tests (post-review). §M3 wind_serve_risk/altitude_serve_boost interactions DEFERRED (config curves + cross-family serve profile)
 ⬜ R6                ResearchAgent orchestrator (agents/research/agent.py) — extractor registry wiring + §M12 windows_days startup guard + §M14 bulk-stats prefetch/perf guard
 ⬜ R7                Fatigue + Market signals extractors (plugs into R6 registry)
 ⬜ Modeling Agent    stacking ensemble, calibration, edge
@@ -155,16 +155,22 @@ Match src/tennis/core/ style exactly:
   the seeded form catalog (raise `FeatureContractError` before
   extraction). No runtime home exists in R4 (no agent yet).
 
-## Carry-forward from R5a
-- **R5b (next):** the `conditions` (weather) family + the §M3
-  `wind_serve_risk`/`altitude_serve_boost` interactions were split out
-  of R5 per the budget flag. R5b builds `features/conditions.py`
-  (`WeatherObservationRepository.nearest_at_or_before(source="owm",
-  max_age_hours=config.features.weather.max_obs_age_hours=3)`, venue
-  `altitude_m` + tournament `indoor`, `forecast_uncertainty_bucket`
-  from `uncertainty_bucket_thresholds`; C9 missing-venue → all-NULL row
-  still written). The two §M3 interactions need NEW config curves AND a
-  cross-family serve profile — a design decision deferred to R5b.
+## Carry-forward from R5b
+- **§M3 weather interactions still DEFERRED (post-R5b):** R5b shipped the
+  `conditions` family as the **9 base keys only**. The two §M3 interaction
+  keys `wind_serve_risk`/`altitude_serve_boost` are NOT in the v1 registry —
+  their catalog rows exist (§15.5) but they need NEW config curves/thresholds
+  AND a cross-family serve profile (wind/altitude × a serve metric), a design
+  pass that couples `conditions` to `serve_return`. `config.features.
+  conditions_interactions.enabled` is present but not yet consumed. A separate,
+  larger session — do not silently fold into R6.
+- **Forecast-vintage PIT gap (accepted v1, §M15):** `ConditionsExtractor`
+  reads weather via `nearest_at_or_before(target_ts=start_ts)`, which has no
+  `created_at < as_of` filter, so at decision time the chosen forecast may
+  post-date the decision instant. Closing this needs a new repo method
+  (publish/vintage timestamp) — deferred, mirrors the §M11 date-granular-rank
+  precedent. (The naive-`start_ts` and band-shape guards from Codex R5b are
+  already fixed in `conditions.py`.)
 - **Serve/return N+1 (Codex R5a, HIGH, deferred to R6, §M14):**
   `ServeReturnExtractor` issues one `MatchStatRepository.get(match_id,
   player_id)` per prior match per player (the spec-prescribed "N

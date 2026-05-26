@@ -66,7 +66,10 @@
       "PowerShell(Remove-Item *)",
       "Read(//c/c/Users/Andrew/Documents/Tennis_Prediction_Bot/**)",
       "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/agents/research/features/test_elo.py -q 2>&1 | Select-Object -Last 25)",
-      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 15)"
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 15)",
+      "PowerShell($env:PYTHONPATH=\"src\"; .venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 30)",
+      "PowerShell($env:PYTHONPATH=\"src\"; .venv\\\\Scripts\\\\python.exe -m pytest tests/unit/agents/research/features/test_conditions.py tests/unit/agents/research/test_specs.py -q 2>&1 | Select-Object -Last 8)",
+      "PowerShell($env:PYTHONPATH=\"src\"; .venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 12)"
     ]
   }
 }

@@ -803,3 +803,36 @@ summation, zero/corrupt-denominator NULL, N+1 deferred to R6).
 `wind_serve_risk`/`altitude_serve_boost` interactions (need new config curves +
 cross-family serve profile). Then R6 ResearchAgent orchestrator (§M12 windows
 guard + §M14 bulk-stats prefetch). R7 = fatigue + market.
+
+## Session 2026-05-26 — R5b: Conditions (weather + venue) extractor
+**Prompt:** Build the deferred half of R5 — the `features.conditions` family
+(the 6 weather fields + `altitude_m` + `indoor` + `forecast_uncertainty_bucket`),
+9 base keys only; defer the §M3 interaction keys. Confirm `VenueRepository.get`
+signature first; implement in plan mode.
+**Shipped:** New `agents/research/features/conditions.py` (`ConditionsExtractor`
++ pure helpers `_build_bands`/`_bucket_for_horizon`) and
+`tests/unit/agents/research/features/test_conditions.py`. Edited `specs.py`
+(registered the 9-key `"conditions"` family — now 7 families) and `test_specs.py`
+(`TestProductionRegistry` extended to the 7-family set + R5b key/dtype +
+round-trip). `validator.py` untouched (all 9 keys non-critical, §0.5/§M8). Tests
+**832 → 871 (+39)**, ~6s, no Docker.
+**Auto-review (RUN REVIEW):** 0 CRITICAL / 0 HIGH (PASS). Its MEDIUM/LOW notes
+were verified non-issues (positional `VenueRepository.get` confirmed at
+`repositories.py:77`; `FeatureContext.tier` exists at `context.py:40`;
+thresholds are pydantic-typed `list[int]`).
+**Codex findings:** 0 CRITICAL / 1 HIGH / 1 MEDIUM, both triaged VALID and fixed.
+(1) HIGH — naive current-match `start_ts` was unguarded (FeatureContext validates
+only `as_of_ts`; `MatchHistoryIndex.build` guards only PRIOR matches) → `extract()`
+now rejects a naive `start_ts` with `ValueError` before any repo lookup, matching
+the `pit_cut`/`MatchHistoryIndex`/`EloWalk.run` precedent. (2) MEDIUM —
+`_build_bands` accepted out-of-order/overlapping/empty bands → silent forecast
+mis-bucket → now validates `lo<hi` + ascending non-overlapping order, raising
+`FeatureContractError`. +5 regression tests (2 PIT-guard, 3 band-shape).
+**New locked decisions:** M15 (Conditions family — `nearest_at_or_before`
+weather reads, positional venue altitude, always-emitted `indoor`, half-open
+`[lo,hi)` + clamping-top band convention, C9/H4 NULL paths, §M3 interactions +
+forecast-vintage PIT both DEFERRED/documented, the two Codex hardenings).
+**Next:** R6 — `ResearchAgent` orchestrator (`agents/research/agent.py`):
+extractor-registry wiring of the 7 base families + (a) the §M12
+`windows_days`-vs-Form-catalog startup guard and (b) the §M14 bulk `match_stats`
+prefetch + query-count perf guard. R7 = fatigue + market.

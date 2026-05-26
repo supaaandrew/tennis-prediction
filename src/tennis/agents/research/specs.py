@@ -50,16 +50,18 @@ def _form_rows() -> tuple[FeatureSpecRow, ...]:
 
 
 # R3 landed the first family ("elo"); R4 appends "rankings", "form", "h2h";
-# R5a appends "surface", "serve_return" — all in lockstep with their extractors
-# (conditions + R7 families append theirs later). Each family's extractor
-# `feature_keys()` MUST equal its seeded rows here — guarded by the per-family
-# round-trip tests under `tests/unit/agents/research/features/`. The 9 Elo keys
-# mirror §15.5 (the 7 base ratings are the §M8 critical keys; the two reliability
-# booleans are non-critical). The Rankings family is NEW to §15.5 (§M11); Form/H2H
-# mirror their §15.5 rows (H2H-advanced reconciled to §M1). Surface mirrors the
-# locked 7-key §15.5 catalog (transition keys reconciled in §M13); serve_return
-# mirrors its 15 §15.5 rows (§M14). All of R4/R5a's keys are non-critical
-# (§0.5/§M8) — none enters `_CRITICAL_FEATURE_KEYS`.
+# R5a appends "surface", "serve_return"; R5b appends "conditions" — all in
+# lockstep with their extractors (R7 families append theirs later). Each family's
+# extractor `feature_keys()` MUST equal its seeded rows here — guarded by the
+# per-family round-trip tests under `tests/unit/agents/research/features/`. The 9
+# Elo keys mirror §15.5 (the 7 base ratings are the §M8 critical keys; the two
+# reliability booleans are non-critical). The Rankings family is NEW to §15.5
+# (§M11); Form/H2H mirror their §15.5 rows (H2H-advanced reconciled to §M1).
+# Surface mirrors the locked 7-key §15.5 catalog (transition keys reconciled in
+# §M13); serve_return mirrors its 15 §15.5 rows (§M14). Conditions mirrors the 9
+# BASE §15.5 keys (§M15; the two §M3 interaction keys remain deferred — not in the
+# v1 registry). All of R4/R5a/R5b's keys are non-critical (§0.5/§M8) — none enters
+# `_CRITICAL_FEATURE_KEYS`.
 _REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {
     "elo": (
         FeatureSpecRow("p1_elo_pre", 1, "float"),
@@ -114,6 +116,17 @@ _REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {
         FeatureSpecRow("p1_bp_save_pct_365d", 1, "float"),
         FeatureSpecRow("p2_bp_save_pct_365d", 1, "float"),
         FeatureSpecRow("serve_dominance_diff_365d", 1, "float"),
+    ),
+    "conditions": (
+        FeatureSpecRow("temp_c_decision", 1, "float"),
+        FeatureSpecRow("humidity_pct_decision", 1, "float"),
+        FeatureSpecRow("wind_speed_ms_decision", 1, "float"),
+        FeatureSpecRow("wind_dir_deg_decision", 1, "int"),
+        FeatureSpecRow("precip_mm_decision", 1, "float"),
+        FeatureSpecRow("cloud_pct_decision", 1, "int"),
+        FeatureSpecRow("altitude_m", 1, "int"),
+        FeatureSpecRow("indoor", 1, "bool"),
+        FeatureSpecRow("forecast_uncertainty_bucket", 1, "cat"),
     ),
 }
 
