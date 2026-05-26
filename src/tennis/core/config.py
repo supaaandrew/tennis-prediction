@@ -314,7 +314,9 @@ class FeaturesSection(_Section):
 class SplitsConfig(_Section):
     method: Literal["walk_forward"] = "walk_forward"
     n_folds: int = 6
-    min_train_seasons: int = 8
+    # §M5: must be positive — a zero/negative warm-up makes every season
+    # "testable" and breaks the walk-forward invariant; fail at config load.
+    min_train_seasons: int = Field(default=8, gt=0)
     embargo_by: Literal["tournament_id"] = "tournament_id"
 
 
@@ -353,7 +355,10 @@ class MetaLearnerConfig(_Section):
 
 class CalibrationConfig(_Section):
     method: Literal["platt", "isotonic"] = "platt"
-    tail_days: int = 60
+    # §M21c: the tail is carved off the training data BEFORE walk-forward CV, so a
+    # zero/negative value would degenerate the carve (and the calibrator) silently
+    # — fail at config load instead (mirrors the §M5 live-offset gt=0 precedent).
+    tail_days: int = Field(default=60, gt=0)
     min_calibration_samples: int = 50
 
 
@@ -382,6 +387,11 @@ class ModelingSection(_Section):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     edge: EdgeConfig = Field(default_factory=EdgeConfig)
     kelly: KellyConfig = Field(default_factory=KellyConfig)
+    # §M20d: local directory the Modeling Agent joblib-serializes trained models
+    # into (no blob store in v1). `artifact_uri` on `model_registry` is a path
+    # under this dir. Relative paths resolve against the process working dir.
+    # Must be non-empty — an empty dir would serialize artifacts to the CWD root.
+    artifact_dir: str = Field(default="artifacts/models", min_length=1)
 
 
 class DecisionTimingSection(_Section):

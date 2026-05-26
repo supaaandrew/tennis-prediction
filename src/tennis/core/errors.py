@@ -145,6 +145,17 @@ class ModelingError(TennisError):
     """Failure in train / calibrate / backtest."""
 
 
+class InsufficientTrainingDataError(ModelingError):
+    """Not enough labelled training rows / seasons to build a model.
+
+    Raised by the Modeling Agent's data-assembly / split stage when the
+    `for_training` slate cannot fill even one walk-forward fold after the
+    `min_train_seasons` warm-up and the calibration-tail carve (§M21c). The
+    agent maps this to a `failed` run with ZERO writes (no `model_registry`
+    row), never a partial.
+    """
+
+
 class CalibrationError(ModelingError):
     """Calibrator could not be fit (e.g. degenerate held-out tail)."""
 

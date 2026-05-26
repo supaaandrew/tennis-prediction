@@ -39,7 +39,15 @@ _ATTEMPT = 1
 # (§L2/§L3). `feature_matrix_invalid` is the Research C10 gate: a rejected matrix
 # writes zero rows, so the run produced nothing usable downstream.
 _FATAL_CODES = frozenset(
-    {"staleness_halt", "preflight_error", "feature_matrix_invalid"}
+    {
+        "staleness_halt",
+        "preflight_error",
+        "feature_matrix_invalid",
+        # Modeling (M1): both mean "no usable model was produced" -> 'failed'
+        # (not 'partial'), per AGENTS.md ModelingAgent status semantics.
+        "insufficient_training_data",
+        "modeling_db_error",
+    }
 )
 # Fixed, arbitrary key for the cluster-wide singleton advisory lock guarding the
 # daily run. Any stable constant works as long as it is unique among advisory-

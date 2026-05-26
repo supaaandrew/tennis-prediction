@@ -961,3 +961,42 @@ asserted a non-NULL fallback) → renamed `test_opening_snapshot_counts_as_decis
 §M12 guard).
 **Next:** Modeling Agent (`agents/modeling/`) — stacking ensemble + calibration + edge vs
 bookmaker implied, reading `feature_matrix` (noise injection happens HERE per H1).
+
+## Session 2026-05-26 — M1a: Modeling Agent (assembly + walk-forward CV + base learners + skeleton)
+**Prompt:** Scope-assess the Modeling Agent, then build it. Locked four foundational decisions
+pre-build as §M20 (native categorical, `_BACKTEST_ONLY_KEYS` module constant, both-sides
+tournament embargo, joblib artifacts/version/feature_hash). Ran a leakage/bias audit before
+planning — approved + locked as §M21: exclude the whole `market` family from the model X
+(edge-circularity), drop walkovers / keep retirements, exclude `forecast_uncertainty_bucket`,
+and the leak-free CV mechanics (tail carved BEFORE CV, early-stop on a train sub-split,
+embargo across the train↔tail seam). Then implemented M1a (split from M1b — stacking /
+calibration / edge / Kelly / predictions deferred).
+**Shipped:** new `src/tennis/models/{feature_set,assembly,splits,base_learners,noise,artifacts}.py`
++ `agents/modeling/agent.py` (`ModelingAgent`) + `tests/unit/models/*` (+conftest) +
+`tests/unit/agents/modeling/{conftest,test_agent}.py`. Config: `ModelingSection.artifact_dir`
+(`min_length=1`), `CalibrationConfig.tail_days` + `SplitsConfig.min_train_seasons` `gt=0`.
+`pipeline.py`: `insufficient_training_data`/`modeling_db_error` → `_FATAL_CODES`. `specs.py`:
+`family_feature_keys()` helper. **968 → 1052 unit tests (+84).** Env: the venv lacked the
+declared ML stack (numpy/pandas/scipy/scikit-learn/joblib/xgboost/lightgbm) → installed;
+`pyproject.toml` per-file ruff ignores for the ML `X`/`X_train` naming convention.
+**Codex findings:** 1 CRITICAL / 2 HIGH / 3 MEDIUM → 5 fixed, 1 deferred. **CRITICAL/HIGH** —
+heartbeat threaded into the `cross_val_oof` fold loop (§L7; was between-steps only, so a long
+multi-fold train couldn't exceed `orphan_after_s` with no beat). **HIGH** — single-class folds:
+CV skips+counts them (`degenerate_folds`), final train raises `InsufficientTrainingDataError`,
+`predict_p1` handles a one-class `(n,1)` proba (was an XGBoost crash + IndexError). **HIGH** —
+zero-OOF/NaN-metric **activation gate**: the agent refuses to insert+activate a model with no
+out-of-fold evidence (fail clean, zero writes). **MEDIUM (fixed)** — µs-resolution version mint
+(no same-second `version` PK collision); invalid-`winner_id` rows dropped+counted (no silent
+p2-win mislabel). **MEDIUM (deferred)** — feature_hash dtype-drift: keys-only per §M20d,
+dtype-drift detection is an M1b/Monitor concern (documented in §M21). Auto-review: ✅ 0 CRITICAL
+(3 polish fixes pre-Codex: the two config `gt=0`/`min_length=1` guards + a dead test param).
+**New locked decisions:** M20 (categorical=native, `_BACKTEST_ONLY_KEYS`, both-sides embargo,
+joblib artifacts/version/hash) + M21 (market family + `forecast_uncertainty_bucket` excluded
+from X, tail-before-CV, train-subsplit early stop, train↔tail embargo, drop-WO/keep-RET;
+feature_hash dtype-drift deferral note).
+**Next:** Modeling Agent **M1b** (`agents/modeling/`) — stacking meta-learner + calibration
+(Platt/isotonic on M1a's held-out tail, →`partial` below `min_calibration_samples`) + edge
+(Shin/proportional devig) + fractional Kelly (per-match + H12 same-day cap) + the `predictions`
+write; plus the REAL H1 noise injection (replacing the `apply_noise` stub) and the categorical
+train/predict code-consistency pin. Reuses M1a's assembly/splits/base_learners/feature_set
+unchanged.

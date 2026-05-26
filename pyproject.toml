@@ -76,8 +76,12 @@ select = [
 ignore = ["PLR0913"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["ARG", "PLR2004", "S101"]
+"tests/**" = ["ARG", "PLR2004", "S101", "N806"]
 "migrations/**" = ["T20", "N999"]
+# ML convention: capital `X` design matrix / `X_train` etc. mirror the
+# sklearn/xgboost/lightgbm public API names; lowercasing them hurts readability.
+"src/tennis/models/**" = ["N803", "N806"]
+"src/tennis/agents/modeling/**" = ["N806"]
 
 [tool.mypy]
 python_version = "3.12"

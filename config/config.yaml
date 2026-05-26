@@ -189,6 +189,7 @@ features:
 # Modeling (Modeling Agent)
 # ---------------------------------------------------------------------------
 modeling:
+  artifact_dir: "artifacts/models"     # §M20d: local joblib artifact store (no blob store v1)
   splits:
     method: "walk_forward"
     n_folds: 6

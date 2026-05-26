@@ -161,6 +161,21 @@ _REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {
 }
 
 
+def family_feature_keys(
+    family: str, *, registry: FeatureSpecRegistry = _REGISTRY
+) -> frozenset[str]:
+    """All feature keys the named family emits, per the catalog registry.
+
+    The single source of truth for "which keys belong to family X" — there is
+    no `family` column on `feature_specs` (§M8 keeps such metadata code-side),
+    so consumers that need family grouping read it here. Used by the Modeling
+    feature-set resolver to drop the whole `market` family from the model's X
+    (§M21a) in a way that survives future market-key additions. Raises
+    `KeyError` on an unregistered family — loud by design.
+    """
+    return frozenset(row.feature_key for row in registry[family])
+
+
 def seed_feature_specs(
     repo: FeatureSpecRepository,
     *,

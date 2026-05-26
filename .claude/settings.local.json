@@ -69,7 +69,22 @@
       "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 15)",
       "PowerShell($env:PYTHONPATH=\"src\"; .venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 30)",
       "PowerShell($env:PYTHONPATH=\"src\"; .venv\\\\Scripts\\\\python.exe -m pytest tests/unit/agents/research/features/test_conditions.py tests/unit/agents/research/test_specs.py -q 2>&1 | Select-Object -Last 8)",
-      "PowerShell($env:PYTHONPATH=\"src\"; .venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 12)"
+      "PowerShell($env:PYTHONPATH=\"src\"; .venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 12)",
+      "Bash(python -c \"import xgboost, lightgbm, pandas, numpy, joblib, sklearn; print\\('xgb', xgboost.__version__, '| lgbm', lightgbm.__version__, '| pandas', pandas.__version__, '| sklearn', sklearn.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import xgboost, lightgbm, pandas, numpy, joblib, sklearn; print\\('xgb', xgboost.__version__, 'lgbm', lightgbm.__version__, 'pandas', pandas.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import pandas,numpy,sklearn,joblib,scipy; print\\('pandas',pandas.__version__,'numpy',numpy.__version__,'sklearn',sklearn.__version__,'scipy',scipy.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe --version)",
+      "Bash(.venv/Scripts/python.exe -c \"import pydantic, structlog, yaml, sqlalchemy; print\\('core deps OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pip show tennis-prediction-bot)",
+      "Bash(.venv/Scripts/python.exe -c \"import tennis; print\\('tennis at', tennis.__file__\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pip install \"numpy>=1.26\" \"pandas>=2.2\" \"scipy>=1.13\" \"scikit-learn>=1.5\" \"joblib>=1.3\" \"xgboost>=2.0\" \"lightgbm>=4.3\" \"pyarrow>=16.0\")",
+      "Bash(.venv/Scripts/python.exe -c \"import numpy,pandas,scipy,sklearn,joblib,xgboost,lightgbm; print\\('ML imports OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/core -q --no-header)",
+      "Bash(PYTHONPATH=src .venv/Scripts/python.exe -c \"import tennis; print\\('tennis OK at', tennis.__file__\\)\")",
+      "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit/core -q --no-header)",
+      "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit -q --no-header)",
+      "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit/models -q --no-header)",
+      "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit/models/test_splits.py -q --no-header)"
     ]
   }
 }
