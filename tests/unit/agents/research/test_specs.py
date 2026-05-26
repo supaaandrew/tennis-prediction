@@ -190,9 +190,22 @@ class TestBuildExpectedSpecs:
 
 
 class TestProductionRegistry:
-    def test_is_empty_in_r2(self) -> None:
-        # Lockstep: no family is registered before its extractor exists (R3 = Elo).
-        assert _REGISTRY == {}
+    def test_elo_family_registered_in_r3(self) -> None:
+        # Lockstep: a family is registered only once its extractor exists. R3
+        # lands "elo" (the first family) with its 9 §15.5 keys.
+        assert set(_REGISTRY) == {"elo"}
+        elo_keys = {row.feature_key for row in _REGISTRY["elo"]}
+        assert elo_keys == {
+            "p1_elo_pre",
+            "p2_elo_pre",
+            "p1_elo_surface_pre",
+            "p2_elo_surface_pre",
+            "p1_elo_blended_pre",
+            "p2_elo_blended_pre",
+            "elo_diff_blended",
+            "p1_elo_reliability_low",
+            "p2_elo_reliability_low",
+        }
 
     def test_critical_keyset_is_the_elo_base_ratings(self) -> None:
         # §0.5 / §15.6: minimal critical set — only never-NULL base Elo ratings.

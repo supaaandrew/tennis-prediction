@@ -46,7 +46,7 @@ class FeatureContext:
             raise ValueError("FeatureContext.as_of_ts must be timezone-aware")
 
 
-def _match_instant(match: MatchRow) -> datetime:
+def match_instant(match: MatchRow) -> datetime:
     """The match's representative instant for chronological ordering + PIT.
 
     `start_ts` when known (intraday precision); otherwise `match_date` at 00:00
@@ -54,10 +54,17 @@ def _match_instant(match: MatchRow) -> datetime:
     and `FeatureMatrixValidator` R4), so the index's PIT boundary agrees with the
     gate. It is a strict superset filter — never *less* PIT-safe than comparing
     `match_date` alone — that the consuming extractor narrows by window/surface.
+
+    Public so R3's Elo walk reuses the exact same §M6 sort key (single source,
+    no drift); the `_match_instant` alias below preserves R2's internal callers.
     """
     if match.start_ts is not None:
         return match.start_ts
     return datetime.combine(match.match_date, time.min, tzinfo=UTC)
+
+
+# Backward-compat alias for R2's internal callers (MatchHistoryIndex) + tests.
+_match_instant = match_instant
 
 
 def _pair_key(a: int, b: int) -> tuple[int, int]:

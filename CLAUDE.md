@@ -27,7 +27,8 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ P6                ATP scraper adapter (client/parser/adapter) + match_id reconciliation, 567 tests (post-review)
 ✅ P7                DataAgent + DailyPipeline (agents/data, agents/orchestrator), §L1-L11, 595 tests
 ✅ R2                Research foundation — point_in_time (pit_cut), context (FeatureContext/MatchHistoryIndex), features/base Protocol, specs seeding, §M5-M8, 660 tests
-⬜ R3-R6             Research extractors (R3 Elo, R4 form/H2H/rank, R5 serve/surface/weather) + R6 ResearchAgent orchestrator (agents/research/agent.py)
+✅ R3                Elo extractor — features/elo.py (EloWalk chronological build + EloExtractor + helpers), first "elo" family in specs registry, §M9-M10, 719 tests (post-review)
+⬜ R4-R6             Research extractors (R4 form/H2H/rank, R5 serve/surface/weather) + R6 ResearchAgent orchestrator (agents/research/agent.py)
 ⬜ R7                Fatigue + Market signals extractors (plugs into R6 registry)
 ⬜ Modeling Agent    stacking ensemble, calibration, edge
 ⬜ Briefing Agent    Claude API, RAG, email

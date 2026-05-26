@@ -64,7 +64,9 @@
       "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import anthropic; print\\('anthropic', anthropic.__version__\\)\"; if \\(Test-Path .claude\\\\hooks\\\\.env\\) { $has = Select-String -Path .claude\\\\hooks\\\\.env -Pattern '^ANTHROPIC_API_KEY=.+' -Quiet; \".env exists: True; has non-empty ANTHROPIC_API_KEY line: $has\" } else { \".env exists: False\" })",
       "PowerShell(.venv\\\\Scripts\\\\python.exe C:\\\\Users\\\\Andrew\\\\AppData\\\\Local\\\\Temp\\\\r2_review_driver.py)",
       "PowerShell(Remove-Item *)",
-      "Read(//c/c/Users/Andrew/Documents/Tennis_Prediction_Bot/**)"
+      "Read(//c/c/Users/Andrew/Documents/Tennis_Prediction_Bot/**)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/agents/research/features/test_elo.py -q 2>&1 | Select-Object -Last 25)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 15)"
     ]
   }
 }

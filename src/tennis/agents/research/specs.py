@@ -29,9 +29,24 @@ _logger = get_logger("tennis.agents.research.specs")
 # family name -> the catalog rows that family emits.
 FeatureSpecRegistry = Mapping[str, tuple[FeatureSpecRow, ...]]
 
-# Empty in R2 by design (lockstep — no extractor exists yet). R3+ append a family
-# entry here in the same session that lands the family's extractor.
-_REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {}
+# R3 lands the first family ("elo"); R4/R5/R7 append their own here in lockstep
+# with their extractors. The 9 Elo keys mirror §15.5 (the 7 base ratings are the
+# §M8 critical keys; the two reliability booleans are non-critical, always
+# present). `EloExtractor.feature_keys()` must equal these keys — guarded by the
+# round-trip test in `tests/unit/agents/research/features/test_elo.py`.
+_REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {
+    "elo": (
+        FeatureSpecRow("p1_elo_pre", 1, "float"),
+        FeatureSpecRow("p2_elo_pre", 1, "float"),
+        FeatureSpecRow("p1_elo_surface_pre", 1, "float"),
+        FeatureSpecRow("p2_elo_surface_pre", 1, "float"),
+        FeatureSpecRow("p1_elo_blended_pre", 1, "float"),
+        FeatureSpecRow("p2_elo_blended_pre", 1, "float"),
+        FeatureSpecRow("elo_diff_blended", 1, "float"),
+        FeatureSpecRow("p1_elo_reliability_low", 1, "bool"),
+        FeatureSpecRow("p2_elo_reliability_low", 1, "bool"),
+    ),
+}
 
 
 def seed_feature_specs(

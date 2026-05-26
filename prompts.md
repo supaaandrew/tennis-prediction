@@ -661,3 +661,62 @@ in the research package.
 walk over `final` matches writing `elo_snapshots` (H7) and emitting the §15.5 Elo
 feature family via the R2 `pit_cut` + `MatchHistoryIndex`. Spec in
 `research_specs.md` §R3; `spec.md` regenerated this session.
+
+## Session 2026-05-26 — R3: Elo extractor (first feature family)
+
+**Prompt:** Lock two new §M decisions (M9 in-memory career counter; M10
+retirement-updates-Elo / walkover-does-not), then implement R3 — the Elo
+extractor: a chronological walk over `final` matches writing `elo_snapshots`
+(H7) and emitting the §15.5 Elo feature family.
+
+**Shipped (660 → 719 tests, +59):**
+- `agents/research/features/elo.py` — the first feature family:
+  - Pure helpers: `_expected_score` (logistic `1/(1+10^((opp−self)/400))`),
+    `_k_factor` (variable-K per H10: `k_new_player` while career count
+    `< k_threshold_matches`, else `k_established`), `_blend`
+    (`(1−surface_blend)·overall + surface_blend·surface`), `_terminal_instant`
+    (snapshot stamp = `start_ts` else `match_date` end-of-day UTC),
+    `_read_rating` (latest pre-cut snapshot or 1500 cold-start), `_fragment`
+    (the 9-key p1-perspective dict).
+  - `EloWalk` — chronological builder. Sorts by the §M6 `match_instant` key,
+    reads pre-match ratings per player × {surface, overall}, emits the fragment,
+    then updates both ladders with per-player K and appends 4 snapshots/match.
+    Owns the in-memory `dict[player_id,int]` career counter (§M9), exposed via
+    `career_counts`. Walkovers skip the update entirely (§M10); retirements
+    update normally.
+  - `EloExtractor` — the `FeatureExtractor` Protocol impl (prediction path).
+    Reads pre-match ratings strictly before `fctx.as_of_ts`; `career_counts`
+    is a **required** ctor arg (drives `reliability_low`).
+- `agents/research/specs.py` — registered the 9-key `"elo"` family in
+  `_REGISTRY` (the first family; exercises the §M7 lockstep + drift guard).
+- `agents/research/context.py` — promoted `_match_instant` → public
+  `match_instant` (back-compat alias kept) so the walk reuses the §M6 sort key
+  with no drift.
+- `tests/.../research/test_specs.py` — updated the R2 "registry empty"
+  assertion to assert the `"elo"` family + its 9 keys.
+- DECISIONS.md: §M9, §M10; two §15.5 reliability rows
+  (`p{1,2}_elo_reliability_low`, bool, non-critical).
+
+**Codex findings (adversarial review — 0 CRITICAL / 0 HIGH; 2 HIGH + 2 MEDIUM
+triaged and all fixed):** (1) HIGH — `EloWalk` not replay-safe vs the append-only
+PK: clarified §M9 (the walk is single-shot; replay = full rebuild against an
+empty/truncated table; rerun on a populated table raises by design — rejected
+`ON CONFLICT DO NOTHING` as drift-hiding) + regression tests (rerun raises,
+full-rebuild deterministic); (2) HIGH — sort could crash on a naive `start_ts`
+with an opaque `TypeError`: `EloWalk.run` now rejects naive `start_ts` up front
+(mirrors `MatchHistoryIndex.build`); (3) MEDIUM — invalid/missing `winner_id`
+skipped silently: now counted + surfaced via `EloWalk.skipped_invalid_winner`
+(non-aborting; escalation deferred to R6); (4) MEDIUM — `EloExtractor` defaulted
+`career_counts={}` (silent "everyone reliability_low"): made it a required arg.
+
+**New locked decisions:** M9 (Elo career counter is in-memory only; single-shot
+full-rebuild replay; surface-agnostic; increments once per counted match), M10
+(retirement updates Elo, walkover does not — structural, distinct from the C14
+fatigue knob) — both in §M.
+
+**Next:** R4 — Rankings + form + H2H (`agents/research/features/{rankings,form,
+h2h}.py`): the §15.5 Form + H2H families plus NEW Rankings rows and H2H
+confidence/recency-decay features, reading prior matches via the R2
+`MatchHistoryIndex` and registering families in `specs._REGISTRY` in lockstep.
+⚠ Budget: R4 has the most keys of any session — if tests trend >120, split
+H2H-advanced. Spec in `research_specs.md` §R4; `spec.md` regenerated this session.
