@@ -836,3 +836,45 @@ forecast-vintage PIT both DEFERRED/documented, the two Codex hardenings).
 extractor-registry wiring of the 7 base families + (a) the §M12
 `windows_days`-vs-Form-catalog startup guard and (b) the §M14 bulk `match_stats`
 prefetch + query-count perf guard. R7 = fatigue + market.
+
+## Session 2026-05-26 — R6a: ResearchAgent orchestrator (split from R6)
+**Prompt:** Build the R6 `ResearchAgent`, but first resolve + lock four design
+questions (Elo `career_counts` on the prediction path; `TournamentRepository.get`
+→ None handling; training-vs-prediction mode selection; the §M14 >120-test split
+trigger). Implement in plan mode after approval.
+**Resolved up front (4 locked decisions):** (1) prediction-path Elo counts are
+RECONSTRUCTED from the ladder via a new `career_match_counts()` (not a walk replay);
+(2) None tournament → skip + dead-letter → `partial` (never fabricate a surface);
+(3) mode is an explicit ctor flag (the `Agent` Protocol fixes `run(ctx)`); (4) R6
+is SPLIT — this is **R6a**, the §M14 bulk read + perf guard deferred to **R6b**.
+**Shipped:** New `agents/research/agent.py` (`ResearchAgent`: mode ctor flag,
+ctor-injectable §M4 extractor-factory registry over the 7 R3–R5b families,
+control flow §M12-guard@ctor → seed → build_expected_specs → per-match loop →
+validate-before-write (C10) → upsert CLEAN rows, per-match fault isolation) and
+`tests/unit/agents/research/test_agent.py` (13). New
+`EloSnapshotRepository.career_match_counts()` (Protocol + impl, `COUNT(DISTINCT
+match_id)`; +3 unit, +2 Docker-gated integration). Edited `pipeline.py`
+(precondition gate before `agent.run()` + agent-exception safety net +
+`feature_matrix_invalid` fatal code; +5 pipeline tests) and `__init__.py`
+(exports). The history index is built from `for_training` finals in BOTH modes
+(a prediction match's priors are past finals); only the loop set differs. Tests
+**871 → 892 (+21)**, ~6s, no Docker.
+**Auto-review (RUN REVIEW):** ✅ 0 CRITICAL. Its two field-existence HIGHs
+(`DeadLetterRow.run_id`, `ingestion.daily_lookforward_days`) were refuted against
+the code (both exist: `rows.py:345`, `config.py:231` + `config.yaml:126`).
+**Codex findings:** 0 CRITICAL / 2 HIGH, both triaged VALID and fixed. (1) HIGH —
+the §M12 windows guard raised `FeatureContractError` out of `run()`, stranding a
+`running` row and breaking the `run()->AgentResult` contract → moved the guard to
+`__init__` (fail-fast at construction; a misconfigured agent is never wired into a
+run) (Fix A). (2) HIGH — a not-met precondition (or any gate/agent exception)
+escaped `_run_locked()` with no terminal status → added an orchestrator safety net
+that writes a terminal `failed` status (redacted, §L10) then re-raises (Fix B).
+**New locked decisions:** M16 (ResearchAgent orchestrator — mode-at-ctor, §M4
+registry realized, control-flow order, validate-before-write, fault isolation,
+§M12-guard-at-construction); M17 (Elo on both paths + `career_match_counts`
+reconstruction + history-always-from-finals); L12 (pipeline precondition-chain
+activation + exception safety net — the two Codex fixes).
+**Next:** R6b — retire the §M14 serve/return N+1 with a bulk `match_stats` read
+(`MatchStatRepository.list_for_player_before` / batch; new Protocol + impl +
+Docker-gated tests) wired into `ServeReturnExtractor`, plus a query-count
+perf-guard test. Then R7 = fatigue + market (append to the R6a §M4 registry).

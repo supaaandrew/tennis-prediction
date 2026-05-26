@@ -22,7 +22,7 @@ Locked decisions baked into the interfaces (these are NOT optional knobs):
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import date, datetime
 from typing import Protocol, runtime_checkable
@@ -392,4 +392,17 @@ class EloSnapshotRepository(Protocol):
         (player, surface). Returns None when no snapshot exists — the
         caller MUST fall back to `config.features.elo.initial_rating`
         (1500 per H10) rather than raise."""
+        ...
+
+    def career_match_counts(self) -> Mapping[int, int]:
+        """Per-player career Elo-updating-match count, reconstructed from the
+        built ladder as `COUNT(DISTINCT match_id)` grouped by `player_id`.
+
+        This is the PREDICTION-path source for the §M9 career counter — which is
+        in-memory only during the training `EloWalk` — that drives the H10
+        K-factor switch and `reliability_low`. Exact: a walkover writes NO
+        snapshot (§M10) and each Elo-updating match writes two rows per player
+        (overall + surface), so the distinct-`match_id` count per player equals
+        the walk's counter. Returns `{}` for an empty ladder; a player absent
+        from the map has 0 (the `EloExtractor` defaults a missing key to 0)."""
         ...

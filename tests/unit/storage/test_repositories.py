@@ -172,6 +172,9 @@ class _FakeEloSnapshot:
     ) -> EloSnapshotRow | None:
         return None
 
+    def career_match_counts(self) -> dict[int, int]:
+        return {}
+
 
 class TestStructuralConformance:
     def test_fake_dead_letter_satisfies_protocol(self) -> None:

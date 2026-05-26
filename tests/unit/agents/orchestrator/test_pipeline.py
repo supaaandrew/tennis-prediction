@@ -23,8 +23,8 @@ from tennis.agents.orchestrator.pipeline import _DAILY_LOCK_KEY
 from tennis.core.clock import FrozenClock
 from tennis.core.config import AppConfig, load_config
 from tennis.core.contracts import AgentContext, AgentError, AgentResult
-from tennis.core.errors import PipelineStartupError
-from tennis.core.lineage import AgentLineage, HeartbeatPolicy
+from tennis.core.errors import PipelineStartupError, PreconditionNotMetError
+from tennis.core.lineage import AgentLineage, HeartbeatPolicy, Precondition
 from tennis.storage.postgres.rows import PipelineRunRow
 
 _NOW = datetime(2026, 5, 24, 6, 30, tzinfo=UTC)
@@ -47,6 +47,10 @@ class _FakeRuns:
         self.fail_update = False
         self.lock_available = True  # set False to simulate a concurrent run
         self.lock_keys: list[int] = []
+        # When set, prior_statuses returns this verbatim — lets a precondition-gate
+        # test simulate a prior agent's terminal status under the fresh run_id
+        # (which is otherwise empty; see the §R6 shared-run_id caveat).
+        self.force_prior: dict[str, str] | None = None
 
     @staticmethod
     def _key(run_id: UUID, agent: str, attempt: int) -> tuple[UUID, str, int]:
@@ -102,6 +106,8 @@ class _FakeRuns:
         )
 
     def prior_statuses(self, *, run_id: UUID) -> dict[str, str]:
+        if self.force_prior is not None:
+            return dict(self.force_prior)
         return {
             agent: row.status
             for (rid, agent, _attempt), row in self.rows.items()
@@ -336,3 +342,98 @@ class TestSingletonLock:
         assert status == "succeeded"
         assert runs.lock_keys == [_DAILY_LOCK_KEY]
         assert agent.ctx is not None
+
+
+# ---------------------------------------------------------------------------
+# R6a — precondition gate placed before agent.run() (M-e)
+# ---------------------------------------------------------------------------
+class _GatedAgent:
+    """An agent declaring a `data`-succeeded precondition (like ResearchAgent),
+    so the pipeline's gate is actually exercised."""
+
+    name = "research"
+
+    def __init__(self, result: AgentResult) -> None:
+        self.lineage = AgentLineage(
+            preconditions=(
+                Precondition(previous_agent="data", required_status="succeeded"),
+            ),
+            heartbeat=HeartbeatPolicy(),
+        )
+        self._result = result
+        self.ctx: AgentContext | None = None
+
+    def run(self, ctx: AgentContext) -> AgentResult:
+        self.ctx = ctx
+        return self._result
+
+
+class TestPreconditionGate:
+    def test_empty_preconditions_is_a_noop_data_agent_runs(self, config: AppConfig) -> None:
+        # DataAgent has no preconditions, so the gate never blocks it.
+        runs = _FakeRuns()
+        agent = _FakeAgent(_ok_result())
+        status = _pipeline(config, runs, agent).run_once()
+        assert status == "succeeded"
+        assert agent.ctx is not None  # agent ran
+
+    def test_gate_raises_when_data_not_succeeded_agent_never_runs(
+        self, config: AppConfig
+    ) -> None:
+        # Fresh run_id → prior_statuses lacks data=succeeded → the gate raises
+        # BEFORE run(), so the agent never executes.
+        runs = _FakeRuns()
+        agent = _GatedAgent(_ok_result())
+        with pytest.raises(PreconditionNotMetError):
+            _pipeline(config, runs, agent).run_once()
+        assert agent.ctx is None  # placed before run(): agent did NOT run
+        # Fix B safety net: the run row is terminally 'failed', NOT left dangling.
+        row = next(iter(runs.rows.values()))
+        assert row.status == "failed"
+        assert row.error is not None
+        assert "PreconditionNotMetError" in row.error["exception"]
+
+    def test_gate_passes_when_data_succeeded(self, config: AppConfig) -> None:
+        runs = _FakeRuns()
+        runs.force_prior = {"data": "succeeded"}  # simulate the prior agent
+        agent = _GatedAgent(_ok_result())
+        status = _pipeline(config, runs, agent).run_once()
+        assert status == "succeeded"
+        assert agent.ctx is not None  # gate passed → agent ran
+
+    def test_agent_exception_writes_failed_and_reraises(self, config: AppConfig) -> None:
+        # Fix B: ANY exception escaping agent.run() (a bug, the §M9 single-shot
+        # rerun IdempotencyError, etc.) terminates the row as 'failed' and stays
+        # loud — it does not strand a 'running' row for the orphan sweep.
+        class _BoomAgent:
+            name = "research"
+
+            def __init__(self) -> None:
+                self.lineage = AgentLineage(preconditions=(), heartbeat=HeartbeatPolicy())
+                self.ctx: AgentContext | None = None
+
+            def run(self, ctx: AgentContext) -> AgentResult:
+                self.ctx = ctx
+                raise RuntimeError("boom mid-run: token=secret")
+
+        runs = _FakeRuns()
+        agent = _BoomAgent()
+        with pytest.raises(RuntimeError, match="boom mid-run"):
+            _pipeline(config, runs, agent).run_once()  # type: ignore[arg-type]
+        assert agent.ctx is not None  # agent DID start (gate is a no-op here)
+        row = next(iter(runs.rows.values()))
+        assert row.status == "failed"
+        assert row.error is not None and "RuntimeError" in row.error["exception"]
+
+    def test_check_preconditions_in_isolation(self) -> None:
+        lineage = AgentLineage(
+            preconditions=(
+                Precondition(previous_agent="data", required_status="succeeded"),
+            ),
+        )
+        # Passes only with the exact required status.
+        lineage.check_preconditions(run_id="r", prior_statuses={"data": "succeeded"})
+        with pytest.raises(PreconditionNotMetError):
+            lineage.check_preconditions(run_id="r", prior_statuses={})
+        with pytest.raises(PreconditionNotMetError):
+            lineage.check_preconditions(run_id="r", prior_statuses={"data": "partial"})

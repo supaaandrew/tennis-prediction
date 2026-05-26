@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -1436,3 +1436,16 @@ class EloSnapshotRepositoryImpl:
                 .limit(1)
             ).scalar_one_or_none()
             return _orm_to_row(o, EloSnapshotRow) if o else None
+
+    def career_match_counts(self) -> Mapping[int, int]:
+        # COUNT(DISTINCT match_id) GROUP BY player_id. DISTINCT dedupes the two
+        # rows (overall + surface) every Elo-updating match writes per player, so
+        # the count equals the §M9 in-memory career counter the EloWalk produced.
+        with self._sf() as s:
+            rows = s.execute(
+                select(
+                    m.EloSnapshot.player_id,
+                    func.count(func.distinct(m.EloSnapshot.match_id)),
+                ).group_by(m.EloSnapshot.player_id)
+            ).all()
+            return {int(player_id): int(count) for player_id, count in rows}

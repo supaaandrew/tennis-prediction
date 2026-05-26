@@ -31,8 +31,9 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ R4                Rankings + Form + H2H extractors — features/{rankings,form,h2h}.py, "rankings"/"form"/"h2h" families in specs registry, §M11-M12, 782 tests (post-review)
 ✅ R5a               Serve/return + Surface extractors — features/{serve_return,surface}.py, "serve_return"(15)/"surface"(7) families in specs registry, §M13-M14, 832 tests (post-review)
 ✅ R5b               Conditions (weather + venue) extractor — features/conditions.py, "conditions"(9) base family in specs registry, §M15, 871 tests (post-review). §M3 wind_serve_risk/altitude_serve_boost interactions DEFERRED (config curves + cross-family serve profile)
-⬜ R6                ResearchAgent orchestrator (agents/research/agent.py) — extractor registry wiring + §M12 windows_days startup guard + §M14 bulk-stats prefetch/perf guard
-⬜ R7                Fatigue + Market signals extractors (plugs into R6 registry)
+✅ R6a               ResearchAgent orchestrator — agents/research/agent.py (mode ctor flag, §M4 factory registry, FeatureContext build, validate→write, §M12 guard@ctor) + EloSnapshotRepository.career_match_counts() + pipeline precondition gate/exception safety net, §M16/§M17/§L12, 892 tests (post-review)
+⬜ R6b               Serve/return bulk match_stats read (retire §M14 N+1) + query-count perf guard
+⬜ R7                Fatigue + Market signals extractors (plugs into R6a §M4 factory registry)
 ⬜ Modeling Agent    stacking ensemble, calibration, edge
 ⬜ Briefing Agent    Claude API, RAG, email
 ⬜ Orchestrator wiring  DI adapter-factory wiring + cron shim → DailyPipeline.run_once() (thin, deferred)

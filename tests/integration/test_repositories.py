@@ -755,3 +755,69 @@ class TestVenueListAll:
         ]
         assert with_coords.venue_id in coord_ids
         assert without_coords.venue_id not in coord_ids
+
+
+# ---------------------------------------------------------------------------
+# EloSnapshotRepository.career_match_counts() — the prediction-path §M9 source
+# ---------------------------------------------------------------------------
+class TestEloCareerMatchCounts:
+    def test_counts_distinct_matches_per_player(self, session_factory: Any) -> None:
+        from tennis.storage.postgres.impl import (
+            EloSnapshotRepositoryImpl,
+            MatchRepositoryImpl,
+            PlayerRepositoryImpl,
+            TournamentRepositoryImpl,
+            VenueRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import EloSnapshotRow
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches = MatchRepositoryImpl(session_factory)
+        elo = EloSnapshotRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="EloCountCity", country="ELO")
+        t = _seed_tournament(tournaments, slug="elo-count", venue_id=v.venue_id)
+        p1 = _seed_player(players, source_uid="eloA")
+        p2 = _seed_player(players, source_uid="eloB")
+
+        # Two matches between p1 and p2. Each Elo-updating match writes TWO rows
+        # per player (overall + surface) — exactly what the EloWalk does — so the
+        # DISTINCT match_id count must collapse them to the per-player match count.
+        rounds = ["R16", "QF"]
+        match_ids = []
+        for i, rnd in enumerate(rounds):
+            mr = _seed_match(
+                matches, tournament_id=t.tournament_id,
+                p1_id=p1.player_id, p2_id=p2.player_id,
+                round=rnd, match_date=date(2026, 1, 10 + i),
+                status="final", source_uid=f"elo-{rnd}",
+            )
+            match_ids.append(mr.match_id)
+            stamp = datetime(2026, 1, 10 + i, 23, 59, tzinfo=UTC)
+            for pid in (p1.player_id, p2.player_id):
+                for surface in ("overall", "Hard"):
+                    elo.insert(EloSnapshotRow(
+                        player_id=pid, surface=surface,
+                        elo_rating=1500.0, as_of_ts=stamp, match_id=mr.match_id,
+                    ))
+
+        counts = elo.career_match_counts()
+        # 4 snapshot rows per player (2 matches × overall+surface) → DISTINCT == 2.
+        assert counts[p1.player_id] == 2
+        assert counts[p2.player_id] == 2
+
+    def test_player_with_no_snapshots_absent_from_map(self, session_factory: Any) -> None:
+        from tennis.storage.postgres.impl import (
+            EloSnapshotRepositoryImpl,
+            PlayerRepositoryImpl,
+        )
+
+        # Session-scoped DB is shared across tests, so assert on a specific
+        # never-snapshotted player rather than an empty map: a player with no
+        # Elo-updating match is simply absent (the EloExtractor defaults to 0).
+        players = PlayerRepositoryImpl(session_factory)
+        ghost = _seed_player(players, source_uid="eloGhost")
+        counts = EloSnapshotRepositoryImpl(session_factory).career_match_counts()
+        assert ghost.player_id not in counts

@@ -280,6 +280,32 @@ class TestEloSnapshotIdempotency:
         factory.assert_not_called()
 
 
+class TestEloSnapshotCareerMatchCounts:
+    """`career_match_counts` reconstructs the §M9 counter from the ladder
+    (COUNT(DISTINCT match_id) per player) for the prediction-path EloExtractor."""
+
+    def test_maps_player_id_to_distinct_match_count(self) -> None:
+        s = MagicMock()
+        s.execute.return_value.all.return_value = [(100, 5), (200, 3)]
+        repo = EloSnapshotRepositoryImpl(_make_mock_factory(s))
+        assert repo.career_match_counts() == {100: 5, 200: 3}
+
+    def test_empty_ladder_returns_empty_mapping(self) -> None:
+        s = MagicMock()
+        s.execute.return_value.all.return_value = []
+        repo = EloSnapshotRepositoryImpl(_make_mock_factory(s))
+        assert repo.career_match_counts() == {}
+
+    def test_counts_coerced_to_int(self) -> None:
+        # DBAPI may hand back numpy/Decimal scalars; the contract is plain ints.
+        s = MagicMock()
+        s.execute.return_value.all.return_value = [(100, True and 7)]
+        repo = EloSnapshotRepositoryImpl(_make_mock_factory(s))
+        result = repo.career_match_counts()
+        assert result == {100: 7}
+        assert all(type(k) is int and type(v) is int for k, v in result.items())
+
+
 # ---------------------------------------------------------------------------
 # 4. Naive-datetime rejection across every datetime-taking method
 # ---------------------------------------------------------------------------

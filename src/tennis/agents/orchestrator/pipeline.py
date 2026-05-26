@@ -35,8 +35,12 @@ _logger = get_logger("tennis.agents.orchestrator.pipeline")
 
 _PIPELINE = "daily"
 _ATTEMPT = 1
-# Error codes that mean "nothing meaningful ran" -> 'failed' (§L2/§L3).
-_FATAL_CODES = frozenset({"staleness_halt", "preflight_error"})
+# Error codes that mean "nothing meaningful ran / was produced" -> 'failed'
+# (§L2/§L3). `feature_matrix_invalid` is the Research C10 gate: a rejected matrix
+# writes zero rows, so the run produced nothing usable downstream.
+_FATAL_CODES = frozenset(
+    {"staleness_halt", "preflight_error", "feature_matrix_invalid"}
+)
 # Fixed, arbitrary key for the cluster-wide singleton advisory lock guarding the
 # daily run. Any stable constant works as long as it is unique among advisory-
 # lock users in this database. Enforces the §L7 "no overlap" assumption in code
@@ -110,7 +114,40 @@ class DailyPipeline:
             heartbeat=self._make_heartbeat(run_id),
         )
         ctx.heartbeat()  # initial beat right after the row exists
-        result = self._agent.run(ctx)
+        # Precondition gate (M-e): a downstream agent (e.g. ResearchAgent) may
+        # only start once its declared prior agent reached the required status
+        # for THIS run_id. No-op for DataAgent (empty preconditions); raises
+        # PreconditionNotMetError otherwise. Placed BEFORE run() so a missing
+        # precondition prevents the agent from doing any work. (Until the
+        # deferred shared-run_id multi-agent loop exists, a brand-new run's
+        # prior_statuses is empty, so a gated agent always fails end-to-end here
+        # — exercised in isolation by tests; see §R6 shared-run_id caveat.)
+        try:
+            self._agent.lineage.check_preconditions(
+                run_id=str(run_id),
+                prior_statuses=self._runs.prior_statuses(run_id=run_id),
+            )
+            result = self._agent.run(ctx)
+        except Exception as exc:
+            # Any failure that escapes the gate or the agent as an EXCEPTION — a
+            # not-met precondition, an agent contract breach, the §M9 single-shot-
+            # rerun IdempotencyError — must still TERMINATE the run row, never
+            # leave it dangling for the orphan sweep while the DB is reachable.
+            # Write a 'failed' terminal status (redacted, §L10) then re-raise so
+            # the failure stays loud (PreconditionNotMetError is "never silent").
+            # NB: only the gate+run() are wrapped — the terminal write below keeps
+            # its §L8 propagate-on-failure behavior (a dangling row there is the
+            # one case the orphan sweep is meant to reap).
+            _logger.error("pipeline_agent_raised", error=redact_text(repr(exc)))
+            self._runs.update_status(
+                run_id=run_id,
+                agent=self._agent.name,
+                attempt=_ATTEMPT,
+                status="failed",
+                finished_at=self._real_clock.now(),
+                error={"exception": f"{type(exc).__name__}: {redact_text(str(exc))}"},
+            )
+            raise
 
         status = self._map_status(result)
         # §L8: a failure on this terminal write PROPAGATES — we never swallow it
@@ -126,11 +163,6 @@ class DailyPipeline:
             error=self._serialize_errors(result.errors),
         )
         _logger.info("pipeline_run_complete", run_id=str(run_id), status=status)
-        # v1 seam: the downstream Research/Modeling/Briefing agents don't exist
-        # yet. When they do, gate each before invoking with
-        #   agent.lineage.check_preconditions(
-        #       run_id=str(run_id),
-        #       prior_statuses=self._runs.prior_statuses(run_id=run_id))
         return status
 
     # -- internals ----------------------------------------------------------
