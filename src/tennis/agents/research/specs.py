@@ -29,11 +29,34 @@ _logger = get_logger("tennis.agents.research.specs")
 # family name -> the catalog rows that family emits.
 FeatureSpecRegistry = Mapping[str, tuple[FeatureSpecRow, ...]]
 
-# R3 lands the first family ("elo"); R4/R5/R7 append their own here in lockstep
-# with their extractors. The 9 Elo keys mirror §15.5 (the 7 base ratings are the
-# §M8 critical keys; the two reliability booleans are non-critical, always
-# present). `EloExtractor.feature_keys()` must equal these keys — guarded by the
-# round-trip test in `tests/unit/agents/research/features/test_elo.py`.
+# Canonical v1 Form windows (§15.5 / config.features.windows_days). The catalog
+# is a static artifact, so the windows are pinned here; the round-trip test asserts
+# `FormExtractor.feature_keys()` (built from config) equals these seeded rows, so a
+# config/catalog divergence fails loud (§M7) rather than silently drifting.
+_FORM_WINDOWS: tuple[int, ...] = (7, 14, 30, 90, 365)
+
+
+def _form_rows() -> tuple[FeatureSpecRow, ...]:
+    """The 25 §15.5 `features.form` rows: per window, win_rate (float) +
+    matches_played (int) for each side, plus the win_rate_diff (float)."""
+    rows: list[FeatureSpecRow] = []
+    for w in _FORM_WINDOWS:
+        rows.append(FeatureSpecRow(f"p1_win_rate_{w}d", 1, "float"))
+        rows.append(FeatureSpecRow(f"p2_win_rate_{w}d", 1, "float"))
+        rows.append(FeatureSpecRow(f"p1_matches_played_{w}d", 1, "int"))
+        rows.append(FeatureSpecRow(f"p2_matches_played_{w}d", 1, "int"))
+        rows.append(FeatureSpecRow(f"win_rate_diff_{w}d", 1, "float"))
+    return tuple(rows)
+
+
+# R3 landed the first family ("elo"); R4 appends "rankings", "form", "h2h" in
+# lockstep with their extractors (R5/R7 append theirs later). Each family's
+# extractor `feature_keys()` MUST equal its seeded rows here — guarded by the
+# per-family round-trip tests under `tests/unit/agents/research/features/`. The 9
+# Elo keys mirror §15.5 (the 7 base ratings are the §M8 critical keys; the two
+# reliability booleans are non-critical). The Rankings family is NEW to §15.5
+# (§M11); Form/H2H mirror their §15.5 rows (H2H-advanced reconciled to §M1). All
+# of R4's keys are non-critical (§0.5/§M8) — none enters `_CRITICAL_FEATURE_KEYS`.
 _REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {
     "elo": (
         FeatureSpecRow("p1_elo_pre", 1, "float"),
@@ -45,6 +68,23 @@ _REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {
         FeatureSpecRow("elo_diff_blended", 1, "float"),
         FeatureSpecRow("p1_elo_reliability_low", 1, "bool"),
         FeatureSpecRow("p2_elo_reliability_low", 1, "bool"),
+    ),
+    "rankings": (
+        FeatureSpecRow("p1_rank_pre", 1, "int"),
+        FeatureSpecRow("p2_rank_pre", 1, "int"),
+        FeatureSpecRow("rank_diff", 1, "int"),
+        FeatureSpecRow("p1_rank_stale", 1, "bool"),
+        FeatureSpecRow("p2_rank_stale", 1, "bool"),
+    ),
+    "form": _form_rows(),
+    "h2h": (
+        FeatureSpecRow("h2h_matches", 1, "int"),
+        FeatureSpecRow("h2h_p1_wins", 1, "int"),
+        FeatureSpecRow("h2h_p1_win_rate", 1, "float"),
+        FeatureSpecRow("h2h_surface_matches", 1, "int"),
+        FeatureSpecRow("h2h_surface_p1_win_rate", 1, "float"),
+        FeatureSpecRow("h2h_win_rate_confidence", 1, "float"),
+        FeatureSpecRow("h2h_win_rate_weighted", 1, "float"),
     ),
 }
 

@@ -273,9 +273,14 @@ class DriftConfig(_Section):
 
 class H2HConfig(_Section):
     # §M1: H2H confidence weighting + recency decay. Read by the H2H extractor
-    # (R4); never hardcode these in the extractor.
-    recency_decay_halflife_years: float = 2.0
-    confidence_full_sample: int = 5
+    # (R4); never hardcode these in the extractor. Both are DIVISORS in the §M1
+    # math (recency-decay halflife; confidence full-sample), so they must be
+    # strictly positive — guarded here (gt=0) to fail fast at config load,
+    # mirroring the §M5 `live_decision_offset_hours` gt=0 precedent. A 0 or
+    # negative value would otherwise crash or destabilise H2H extraction for the
+    # whole batch at runtime.
+    recency_decay_halflife_years: float = Field(default=2.0, gt=0.0)
+    confidence_full_sample: int = Field(default=5, gt=0)
 
 
 class SurfaceTransitionConfig(_Section):

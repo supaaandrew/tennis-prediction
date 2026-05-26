@@ -192,8 +192,8 @@ class TestBuildExpectedSpecs:
 class TestProductionRegistry:
     def test_elo_family_registered_in_r3(self) -> None:
         # Lockstep: a family is registered only once its extractor exists. R3
-        # lands "elo" (the first family) with its 9 §15.5 keys.
-        assert set(_REGISTRY) == {"elo"}
+        # landed "elo" (the first family) with its 9 §15.5 keys.
+        assert "elo" in _REGISTRY
         elo_keys = {row.feature_key for row in _REGISTRY["elo"]}
         assert elo_keys == {
             "p1_elo_pre",
@@ -214,3 +214,39 @@ class TestProductionRegistry:
         # Derived reliability booleans are NOT critical (always present, but the
         # set is restricted to the rating keys carrying the 1500 fallback).
         assert "p1_elo_reliability_low" not in _CRITICAL_FEATURE_KEYS
+
+    def test_r4_families_registered(self) -> None:
+        # R4 appends rankings/form/h2h in lockstep with their extractors.
+        assert set(_REGISTRY) == {"elo", "rankings", "form", "h2h"}
+        assert {row.feature_key for row in _REGISTRY["rankings"]} == {
+            "p1_rank_pre",
+            "p2_rank_pre",
+            "rank_diff",
+            "p1_rank_stale",
+            "p2_rank_stale",
+        }
+        assert {row.feature_key for row in _REGISTRY["h2h"]} == {
+            "h2h_matches",
+            "h2h_p1_wins",
+            "h2h_p1_win_rate",
+            "h2h_surface_matches",
+            "h2h_surface_p1_win_rate",
+            "h2h_win_rate_confidence",
+            "h2h_win_rate_weighted",
+        }
+        # Form = 5 windows × (2 win_rate + 2 matches_played + 1 diff) = 25 rows.
+        assert len(_REGISTRY["form"]) == 25
+
+    def test_r4_families_round_trip_and_non_critical(self) -> None:
+        # Seed + build against the PRODUCTION registry: every registered key must
+        # round-trip, and none of the R4 families may be critical (§0.5/§M8).
+        repo = _FakeFeatureSpecRepo()
+        families = ["rankings", "form", "h2h"]
+        seed_feature_specs(repo, families=families)
+        specs = build_expected_specs(repo, feature_set="v1", families=families)
+
+        expected = {
+            row.feature_key for fam in families for row in _REGISTRY[fam]
+        }
+        assert {s.feature_key for s in specs} == expected
+        assert all(s.critical is False for s in specs)

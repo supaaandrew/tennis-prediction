@@ -720,3 +720,56 @@ confidence/recency-decay features, reading prior matches via the R2
 `MatchHistoryIndex` and registering families in `specs._REGISTRY` in lockstep.
 ⚠ Budget: R4 has the most keys of any session — if tests trend >120, split
 H2H-advanced. Spec in `research_specs.md` §R4; `spec.md` regenerated this session.
+
+---
+
+## Session 2026-05-26 — R4: Rankings + Form + H2H extractors
+
+**Prompt:** Build the three §15.5 history-based feature families on the R2/R3
+substrate — Rankings, Form, H2H — registering each in `specs._REGISTRY` in
+lockstep (§M7). Pre-work: clarify the RUN-REVIEW gate wording in CLAUDE.md +
+spec.md, and confirm the §15.5 H2H/Form catalog keys against DECISIONS before coding.
+
+**Shipped (719 → 782 tests, +63):**
+- `agents/research/features/rankings.py` — `RankingsExtractor`: pre-match rank via
+  `PlayerRankingRepository.latest_before(on_or_before=as_of.date())` + staleness
+  window (7d fresh / 8d stale), `rank_diff` (p1−p2, NULL-prop), `*_rank_stale`
+  (absent ≠ stale).
+- `agents/research/features/form.py` — `FormExtractor`: rolling win-rate per
+  window×side over the half-open `[as_of−w, as_of)` window, NULL below
+  `min_window_samples.elo_form` (5, M-c — not the §15.5 literal "3"),
+  `matches_played` always int, C14 counting (retirement counted, walkover excluded).
+- `agents/research/features/h2h.py` — `H2HExtractor`: base counts/rate +
+  surface-filter (via injected `TournamentRepository`, since `MatchRow` has no
+  surface) + §M1 advanced (`h2h_win_rate_confidence` shrink-to-0.5,
+  `h2h_win_rate_weighted` recency decay, years from `as_of`); C14 meeting counting.
+- `specs.py` — registered `"rankings"`(5) / `"form"`(25) / `"h2h"`(7) families.
+- Tests: `test_{rankings,form,h2h}.py` + `test_specs.py` registry update; +4
+  `test_config.py` H2H positivity tests (Codex fix).
+- `config.py` — `H2HConfig.confidence_full_sample` / `recency_decay_halflife_years`
+  now `Field(gt=0)` (Codex fix; §M5 precedent).
+
+**Codex findings (adversarial review — 0 CRITICAL / 1 HIGH / 2 MEDIUM; all triaged):**
+(1) HIGH — Rankings `<=`-on-date PIT vs §15.5's "< not ≤" convention: triaged
+PARTIALLY VALID → documented as accepted v1 limitation in §M11 (date-granular, no
+historical/training leak, marginal live-intraday edge, timestamp-PIT deferred —
+needs a schema change); no code change (spec.md directed it + locked repo contract).
+(2) MEDIUM — H2H divides by unconstrained config (`confidence_full_sample`,
+`recency_decay_halflife_years`): VALID → added `gt=0` guards + 4 tests.
+(3) MEDIUM — Form pinned `_FORM_WINDOWS` vs runtime `config.features.windows_days`:
+VALID defense-in-depth → deferred to the R6 ResearchAgent startup guard (no runtime
+home in R4); recorded as a CLAUDE.md R4 carry-forward.
+Note: the stop-hook review's lone HIGH ("`TournamentRepository.get` missing") was a
+verified FALSE POSITIVE — the method exists at `repositories.py:91` (used positionally
+by `EloWalk` since R3); no change.
+
+**New locked decisions:** M11 (Rankings family + accepted date-granular rank-PIT
+limitation), M12 (R4 §15.5-prose reconciliations: Form threshold=`elo_form`;
+`*_365d`-critical prose VOID / Form non-critical; H2H reads the C14 flags). New
+§15.5 Rankings catalog table; stale Form/H2H §15.5 prose reconciled in place.
+
+**Next:** R5 — serve/return + surface affinity + conditions (weather) extractors
+(`features.serve_return` / `features.surface` / `features.conditions`), reading
+`match_stats` / prior matches via the R2 `MatchHistoryIndex`. R6 then lands the
+`ResearchAgent` orchestrator and MUST add the §M12 / carry-forward startup invariant
+(`config.features.windows_days` == seeded Form catalog). R7 = fatigue + market.

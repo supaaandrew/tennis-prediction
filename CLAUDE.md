@@ -28,7 +28,8 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ P7                DataAgent + DailyPipeline (agents/data, agents/orchestrator), §L1-L11, 595 tests
 ✅ R2                Research foundation — point_in_time (pit_cut), context (FeatureContext/MatchHistoryIndex), features/base Protocol, specs seeding, §M5-M8, 660 tests
 ✅ R3                Elo extractor — features/elo.py (EloWalk chronological build + EloExtractor + helpers), first "elo" family in specs registry, §M9-M10, 719 tests (post-review)
-⬜ R4-R6             Research extractors (R4 form/H2H/rank, R5 serve/surface/weather) + R6 ResearchAgent orchestrator (agents/research/agent.py)
+✅ R4                Rankings + Form + H2H extractors — features/{rankings,form,h2h}.py, "rankings"/"form"/"h2h" families in specs registry, §M11-M12, 782 tests (post-review)
+⬜ R5-R6             Research extractors (R5 serve/return + surface affinity + conditions/weather) + R6 ResearchAgent orchestrator (agents/research/agent.py)
 ⬜ R7                Fatigue + Market signals extractors (plugs into R6 registry)
 ⬜ Modeling Agent    stacking ensemble, calibration, edge
 ⬜ Briefing Agent    Claude API, RAG, email
@@ -103,8 +104,11 @@ Match src/tennis/core/ style exactly:
    - Any new locked decisions discovered this session
 5. Update CURRENT STATUS in this file (CLAUDE.md).
 6. Write session summary to prompts.md.
-7. Stop hook fires automatically — check review.md.
-   If CRITICAL found: fix before stopping.
+7. Trigger the review: RUN REVIEW must appear at the end of the
+   USER's typed message — NOT in Claude Code's output. The stop
+   hook reads the last user-typed message from the transcript, so
+   Claude echoing "RUN REVIEW" does nothing; the user must type it.
+   Once fired, check review.md. If CRITICAL found: fix before stopping.
 8. Codex adversarial review before git commit (manual).
 
 ---
@@ -134,6 +138,20 @@ Match src/tennis/core/ style exactly:
 - §L6: once the current Sackmann season is watermarked `complete`,
   daily re-ingest skips it; later-finalized current-season matches
   need a watermark reset (Sackmann adapter concern, not P7).
+
+## Carry-forward from R4 (for R6 ResearchAgent wiring)
+- Form catalog/runtime windows guard (Codex R4, MEDIUM): the
+  `feature_specs` `"form"` rows are seeded from a PINNED
+  `_FORM_WINDOWS=(7,14,30,90,365)` in `specs.py`, but
+  `FormExtractor.feature_keys()` is built from
+  `config.features.windows_days`. Divergence is caught at TEST time
+  (`test_feature_keys_equal_seeded_form_rows`) and partly at
+  validation time, but a config-only change deployed without CI would
+  diverge at runtime (fewer windows → loud R1 failure; EXTRA windows →
+  silently emitted, unvalidated). R6 must add a startup invariant in
+  ResearchAgent wiring asserting `config.features.windows_days` matches
+  the seeded form catalog (raise `FeatureContractError` before
+  extraction). No runtime home exists in R4 (no agent yet).
 
 ---
 

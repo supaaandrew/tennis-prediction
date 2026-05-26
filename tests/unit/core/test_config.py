@@ -151,6 +151,42 @@ class TestLoadRealConfig:
 
 
 # --------------------------------------------------------------------------
+# H2H §M1 divisor positivity (R4 — Codex adversarial finding; §M5 gt=0 precedent)
+# --------------------------------------------------------------------------
+class TestH2HConfigPositivity:
+    def test_zero_full_sample_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        from tennis.core.config import H2HConfig
+
+        with pytest.raises(ValidationError):
+            H2HConfig(confidence_full_sample=0)
+
+    def test_zero_halflife_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        from tennis.core.config import H2HConfig
+
+        with pytest.raises(ValidationError):
+            H2HConfig(recency_decay_halflife_years=0.0)
+
+    def test_negative_halflife_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        from tennis.core.config import H2HConfig
+
+        with pytest.raises(ValidationError):
+            H2HConfig(recency_decay_halflife_years=-1.0)
+
+    def test_defaults_are_valid(self) -> None:
+        from tennis.core.config import H2HConfig
+
+        cfg = H2HConfig()
+        assert cfg.confidence_full_sample == 5
+        assert cfg.recency_decay_halflife_years == 2.0
+
+
+# --------------------------------------------------------------------------
 # Loader error handling
 # --------------------------------------------------------------------------
 class TestLoadConfigErrors:
