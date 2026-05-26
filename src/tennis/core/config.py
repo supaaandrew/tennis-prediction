@@ -271,12 +271,38 @@ class DriftConfig(_Section):
     ks_alpha: float = 0.01
 
 
+class H2HConfig(_Section):
+    # §M1: H2H confidence weighting + recency decay. Read by the H2H extractor
+    # (R4); never hardcode these in the extractor.
+    recency_decay_halflife_years: float = 2.0
+    confidence_full_sample: int = 5
+
+
+class SurfaceTransitionConfig(_Section):
+    # §M2: surface transition exposure windows (days). Plain list default —
+    # pydantic v2 copies mutable defaults per instance.
+    adaptation_exposure_days: list[int] = [30, 90]
+
+
+class ConditionsInteractionsConfig(_Section):
+    # §M3: weather interaction allow-list. v1 = the two highest-signal terms;
+    # all other interactions deferred.
+    enabled: list[str] = ["wind_serve_risk", "altitude_serve_boost"]
+
+
 class FeaturesSection(_Section):
     feature_set: str = "v1"
     windows_days: tuple[int, ...] = (7, 14, 30, 90, 365)
     elo: EloConfig = Field(default_factory=EloConfig)
     market: MarketConfig = Field(default_factory=MarketConfig)
     weather: WeatherFeatureConfig = Field(default_factory=WeatherFeatureConfig)
+    h2h: H2HConfig = Field(default_factory=H2HConfig)
+    surface_transition: SurfaceTransitionConfig = Field(
+        default_factory=SurfaceTransitionConfig
+    )
+    conditions_interactions: ConditionsInteractionsConfig = Field(
+        default_factory=ConditionsInteractionsConfig
+    )
     drift: DriftConfig = Field(default_factory=DriftConfig)
 
 

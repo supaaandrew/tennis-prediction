@@ -172,6 +172,15 @@ features:
       medium: { temp_c: 1.5,  humidity_pct: 5.0,  wind_speed_ms: 1.5  }
       high:   { temp_c: 3.0,  humidity_pct: 10.0, wind_speed_ms: 3.0  }
     max_obs_age_hours: 3                # H4: observations older than this -> NULL features
+  h2h:
+    recency_decay_halflife_years: 2.0   # §M1
+    confidence_full_sample: 5           # §M1
+  surface_transition:
+    adaptation_exposure_days: [30, 90]  # §M2
+  conditions_interactions:
+    enabled:                            # §M3
+      - wind_serve_risk
+      - altitude_serve_boost
   drift:
     psi_threshold: 0.2
     ks_alpha: 0.01

@@ -129,3 +129,38 @@ Then output exactly:
 
 Run Codex with:
 /codex:adversarial-review \"$(cat .codex_prompt.txt)\""
+
+<!--
+═══════════════════════════════════════════════════════════════════
+AFTER THE CODEX RUN — TRIAGE PROTOCOL (surface this to the user too)
+═══════════════════════════════════════════════════════════════════
+
+After the user runs /codex:adversarial-review, they paste the output back
+to Claude Code. Triage EVERY finding before making any changes. Use this
+prompt verbatim:
+
+---
+Here is the Codex adversarial review output. Triage each finding before
+making any changes:
+
+For each finding state:
+- VALID / INVALID / PARTIALLY VALID
+- Why — cite the specific file and line if refuting
+- If VALID: exact fix required (file, line, what to change)
+- If INVALID: what in the code refutes it
+- If PARTIALLY VALID: what part is real, what part is not, and the scoped fix
+
+Severity guidance:
+- CRITICAL/HIGH valid    → fix immediately
+- CRITICAL/HIGH invalid  → document why it is a false positive
+- MEDIUM valid + trivially easy   → fix
+- MEDIUM valid + complex          → defer as documented v1 limitation
+- LOW → defer unless one-liner
+
+Do not make any changes until triage is complete.
+Wait for approval before fixing anything.
+---
+-->
+
+After printing the run command, also remind the user (outside the prompt
+file) to paste the Codex output back for triage using the protocol above.

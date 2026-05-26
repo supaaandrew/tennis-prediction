@@ -137,6 +137,8 @@ Tennis_Prediction_Bot/
 ├── .env.example               # every required env var by env tier
 ├── DECISIONS.md               # THIS FILE
 ├── prompts.md                 # session build log
+├── AGENTS.md                  # multi-agent orchestration layer (DAG, per-agent contracts, gates)
+├── research_specs.md          # Research Agent specs R3-R7 + mismatch register
 ├── config/
 │   ├── config.yaml            # single source of all knobs (no secrets)
 │   ├── player_overrides.yaml  # manual alias overrides (empty stub)
@@ -222,11 +224,14 @@ Tennis_Prediction_Bot/
 ```
 
 Modules not yet built (Day 4+ work):
-`agents/{modeling,briefing}/`, `features/`, `models/`,
-`storage/qdrant/`, `cli.py`. The P7 wiring (adapter-factory construction
-in the DI container + cron shim invoking `DailyPipeline.run_once()`) is a thin
-deferred glue layer — the `run_once()` entrypoint exists; scheduler wiring is
-out of P7 scope.
+`agents/research/{point_in_time.py, context.py, features/, agent.py}`
+— Research Agent feature modules live UNDER `agents/research/`, NOT at a
+top-level `features/` directory (the committed `agents/research/validator.py`
+and the `tennis.agents.research` import surface fix this location) —
+`agents/{modeling,briefing}/`, `models/`, `storage/qdrant/`, `cli.py`. The P7
+wiring (adapter-factory construction in the DI container + cron shim invoking
+`DailyPipeline.run_once()`) is a thin deferred glue layer — the `run_once()`
+entrypoint exists; scheduler wiring is out of P7 scope.
 
 ---
 
@@ -629,6 +634,23 @@ adapter failing must neither abort the others nor be silently reported as succes
 
 ---
 
+## M. Research Agent feature & derivation locks
+
+Locks for the Research Agent feature families (sessions R2–R7). Letter `M`
+(`G` is "intentionally skipped"; `M` is the next free letter that does not
+collide with build-phase `P#`, session `R#`, or validator-rule `R#` labels).
+New feature rows are mirrored into §15.5; new config keys live under
+`features.*` (never hardcoded).
+
+| # | Decision | Rationale |
+|---|---|---|
+| M1 | H2H confidence weighting: `confidence = min(n_matches / confidence_full_sample, 1.0)`. Recency decay: `weight = exp(-age_years / halflife_years)`. Both thresholds from `config.features.h2h` — never hardcode. | Raw H2H win rate is noisy on small samples; decayed weighting prevents stale dominance data from overpowering recent form. |
+| M2 | Surface transition uses categorical `transition_type` + exposure counts only. `adaptation_formula = log1p(matches_on_new_surface)`. No redundant binary flags. Thresholds from `config.features.surface_transition`. | Binaries add no information beyond the count; `log1p` captures diminishing adaptation returns. |
+| M3 | Weather interactions v1: `wind_serve_risk` and `altitude_serve_boost` only. All other interactions deferred. Enabled list in `config.features.conditions_interactions.enabled`. | Sparse weather data makes interaction terms noisy; only the two highest-signal interactions are included in v1. |
+| M4 | R7 session planned for Fatigue + Market signals (`sets_played`, `minutes`, `rest_days`, bo5 weighting; Pinnacle implied, line movement, book disagreement). R6 ResearchAgent uses an extensible extractor registry so R7 plugs in without changing `agent.py`. | Fatigue and market signals require separate data joins; bundling into R5/R6 would blow context. |
+
+---
+
 ## 13. Build & run quickstart
 
 ```powershell
@@ -666,7 +688,9 @@ $env:DATABASE_URL = "postgresql+psycopg://user:pass@host:5432/db"
 | 4 | [hash TBD] | Venue geocoding (P7 follow-on, 593→595 tests, +2): `scripts/geocode_venues.py` (one-shot GeoPy/Nominatim) generates `config/venue_coords.yaml` (58 entries, manually reviewed; one Nominatim misfire on Los Cabos corrected). `DataAgent._step_geocode_venues()` idempotently upserts city-level venues from the YAML before the OWM step, closing the §L5 weather gap. T21 (`test_agent.py`, 2 methods) covers the happy path (collision collapse, correct `venue_id`, runs before OWM) and the missing-YAML degrade. New locked decision L11 (§L). |
 | 4 | [hash TBD] | DataAgent orchestrator P7 (567→593 tests, +26): `agents/data/agent.py` (`DataAgent`) + `agents/orchestrator/pipeline.py` (`DailyPipeline`). Prerequisites: `VenueRepository.list_all` (Protocol + impl, for OWM venue enumeration) and `AgentContext.heartbeat` (additive no-op-default field, resolves the per-run-emitter-vs-once-built-agent circular dependency). DataAgent wires the four committed adapters in the §J2 data-write order (scraper→Sackmann→Odds→Weather) with adapter-level fault isolation, a Sackmann staleness pre-flight halt, a single `as_of` threaded via a pinned clock, and a per-adapter metrics dict. DailyPipeline owns the `pipeline_runs` lifecycle: orphan sweep → `running` row → heartbeat closure (real clock) → terminal status (`succeeded`/`partial`/`failed`) → `update_status`; `PipelineStartupError` for DB-unavailable-at-startup. Post-Codex hardening: cluster-wide singleton advisory lock around `run_once()` (`PipelineRunRepository.advisory_lock`) so overlapping runs can't reap each other's live rows, and `redact_text` sanitization of exception text before it reaches `pipeline_runs.error`/logs. New locked decisions L1–L10 (§L); 593 tests. |
 
-Next session resumes at **Day 4 — Research Agent**; the DataAgent (P7) wires all four source adapters into `DailyPipeline.run_once()`. Remaining glue (DI adapter-factory wiring + cron shim) is the deferred thin layer noted in §5.
+| 4 (R1) | [hash TBD] | Research Agent session **planning** — no implementation, 595 tests unchanged. Created `AGENTS.md` (multi-agent orchestration layer: DAG, per-agent Postgres contracts, precondition/heartbeat/PIT/status-propagation sections) and `research_specs.md` (R3–R7 specs + mismatch register); rewrote `spec.md` to **R2** (point_in_time.py + feature infrastructure + feature_specs seeding). New locked decisions **M1–M4** (§M). Six §15.5 feature rows added (`h2h_win_rate_confidence`, `h2h_win_rate_weighted`, `surface_transition_type`, `surface_transition_exposure`, `wind_serve_risk` [2012+ OWM era], `altitude_serve_boost` [1991+ serve-stats era]) with matching config keys (`features.h2h`, `features.surface_transition`, `features.conditions_interactions`) + pydantic sub-configs (`H2HConfig`/`SurfaceTransitionConfig`/`ConditionsInteractionsConfig` on `FeaturesSection`). §15.6 critical-column note (`_CRITICAL_FEATURE_KEYS` lives in `agents/research/validator.py`; no `feature_specs.critical` column). §5 topology + CLAUDE.md reconciled to `agents/research/` (R7 added to build status). `adversarial-review` skill: post-Codex triage protocol appended. No Codex run this session (planning only). |
+
+Next session resumes at **R2 — point_in_time.py + feature infrastructure + feature_specs seeding** (`spec.md`); R3–R7 specs are in `research_specs.md`. The Research Agent derives `feature_matrix` from the committed DataAgent rows under strict PIT (live `start_ts − 24h`, historical `match_date − 1 day`). Remaining glue (DI adapter-factory wiring + cron shim) is the deferred thin layer noted in §5.
 
 ---
 
@@ -881,6 +905,8 @@ the long-window keys (`*_365d`) as critical — short windows allowed NULL.
 | `h2h_p1_win_rate` | derived | `h2h_p1_wins / h2h_matches`; NULL if `h2h_matches = 0`. | none | 1968+ |
 | `h2h_surface_matches` | Sackmann | Same as above but filtered to `tournaments.surface = current match surface`. | none | 1968+ |
 | `h2h_surface_p1_win_rate` | derived | Same, surface-specific. NULL if denominator < 1. | none | 1968+ |
+| `h2h_win_rate_confidence` | derived | §M1 confidence-weighted H2H win rate: `h2h_p1_win_rate` shrunk by `min(h2h_matches / features.h2h.confidence_full_sample, 1.0)` toward 0.5. NULL if `h2h_matches = 0`. | none | 2000+ |
+| `h2h_win_rate_weighted` | derived | §M1 recency-decayed H2H win rate: each prior meeting weighted `exp(-age_years / features.h2h.recency_decay_halflife_years)`. NULL if `h2h_matches = 0`. | none | 2000+ |
 
 #### Surface affinity — `features.surface`
 
@@ -889,6 +915,8 @@ the long-window keys (`*_365d`) as critical — short windows allowed NULL.
 | `p{1,2}_career_win_rate_surface` | Sackmann | Player's lifetime win-rate on this match's `surface` (matches before `as_of`). | none | 1968+ |
 | `p{1,2}_recent_win_rate_surface_365d` | Sackmann | Win-rate on this surface in the trailing 365 days. NULL if < 3 surface matches in window. | none | 1968+ |
 | `surface_affinity_diff` | derived | `p1_recent_win_rate_surface_365d - p2_recent_win_rate_surface_365d`. | none | 1968+ |
+| `surface_transition_type` | Sackmann | §M2 categorical transition from the player's previous match surface to this match's surface (e.g. `"clay->hard"`, `"same"`, `"none"` for first match). | none | 2000+ |
+| `surface_transition_exposure` | Sackmann | §M2 matches played on this match's surface within `features.surface_transition.adaptation_exposure_days`; reported as `log1p(count)` (adaptation_formula). | none | 2000+ |
 
 #### Fatigue — `features.fatigue`
 
@@ -958,6 +986,8 @@ written (C9). The validator R3 does NOT mark these as critical-null.
 | `altitude_m` | `venues` | Static venue attribute. Affects ball-flight physics. | none | Where venue geocoded |
 | `indoor` | `tournaments.indoor` | Boolean; weather features are still emitted indoors (HVAC ≠ outdoor) but `indoor=true` lets the model down-weight them. | none | full |
 | `forecast_uncertainty_bucket` | derived | "low"/"medium"/"high" from `forecast_horizon_h` of the snapshot used. NULL for hindcast (training). Drives noise-injection sigma at training time. | none | OWM era |
+| `wind_serve_risk` | derived | §M3 wind × serve interaction (`wind_speed_ms_decision` against serve profile). Only emitted when in `features.conditions_interactions.enabled`. NULL when wind/serve inputs missing. | medium | 2012+ (OWM era) |
+| `altitude_serve_boost` | derived | §M3 altitude serve boost from `altitude_m` (thin-air ball flight) × serve profile. Only emitted when in `features.conditions_interactions.enabled`. NULL when altitude missing. | none | 1991+ (serve stats era) |
 
 Indoor + missing-venue handling: if `indoor=true` the validator does not
 flag missing-weather as critical. If `venue_id IS NULL`, all conditions
@@ -976,6 +1006,7 @@ features NULL — validator R3 records the gap; model imputes.
 | Disagreement between sources after both written | `matches.intraday_conflict = TRUE`; audit-only, never gates training (A10) | DataAgent post-ingest pass |
 | Missing market data | `allow_missing_odds=true`; prediction written with NULL edges (C9) | `modeling.edge` config + `predictions` schema |
 | Stale Sackmann | `SackmannStalenessError` raised if last pull older than `max_staleness_days=3`; halt pipeline (C5) | DataAgent staleness check |
+| Critical-feature designation | `FeatureSpecRow` has **no `critical` column**; the set of critical feature keys lives in code as `_CRITICAL_FEATURE_KEYS` in `agents/research/validator.py`. Do NOT add a `critical` field to `FeatureSpecRow` or the `feature_specs` table — the validator reads the hardcoded set, not a DB column. | `agents/research/validator.py` |
 
 This section is the durable handshake. Research Agent reads ONLY columns
 listed here; Data Agent writes ONLY rows that conform. Any new feature

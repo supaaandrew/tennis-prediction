@@ -26,7 +26,8 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ P5                Odds API adapter (client/parser/adapter) + match linkage, 507 tests (post-review)
 ✅ P6                ATP scraper adapter (client/parser/adapter) + match_id reconciliation, 567 tests (post-review)
 ✅ P7                DataAgent + DailyPipeline (agents/data, agents/orchestrator), §L1-L11, 595 tests
-⬜ Research Agent    features/, point_in_time.py, Elo extractor
+⬜ Research Agent    agents/research/{point_in_time.py, features/, agent.py} (R2-R6)
+⬜ R7                Fatigue + Market signals extractors (plugs into R6 registry)
 ⬜ Modeling Agent    stacking ensemble, calibration, edge
 ⬜ Briefing Agent    Claude API, RAG, email
 ⬜ Orchestrator wiring  DI adapter-factory wiring + cron shim → DailyPipeline.run_once() (thin, deferred)
@@ -146,6 +147,9 @@ src/tennis/core/            cross-cutting primitives
 src/tennis/storage/         repository protocols + implementations
 src/tennis/adapters/        data source adapters (building now)
 src/tennis/agents/          agent orchestration (building next)
+src/tennis/agents/research/ Research Agent: point_in_time.py, validator.py,
+                            features/ (extractors, R2-R7), agent.py.
+                            Feature modules live HERE, NOT at top-level features/.
 migrations/versions/        authoritative schema source
 tests/unit/                 fast unit tests (no Docker)
 tests/integration/          DB integration tests (Docker)

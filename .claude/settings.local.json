@@ -58,7 +58,8 @@
       "Bash(python -c \"import py_compile; py_compile.compile\\('.claude/hooks/review.py', doraise=True\\); print\\('review.py compiles OK'\\)\")",
       "Bash(Get-ChildItem *)",
       "Bash(Select-Object -First 50 FullName)",
-      "Bash(python -)"
+      "Bash(python -)",
+      "PowerShell($env:PYTHONPATH = \"src\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit -q 2>&1 | Select-Object -Last 5)"
     ]
   }
 }
