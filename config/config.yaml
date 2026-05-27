@@ -190,6 +190,7 @@ features:
 # ---------------------------------------------------------------------------
 modeling:
   artifact_dir: "artifacts/models"     # §M20d: local joblib artifact store (no blob store v1)
+  random_seed: 42                      # §M22: seed for the H1 training-noise RNG (deterministic retrains/tests)
   splits:
     method: "walk_forward"
     n_folds: 6

@@ -81,7 +81,9 @@ ignore = ["PLR0913"]
 # ML convention: capital `X` design matrix / `X_train` etc. mirror the
 # sklearn/xgboost/lightgbm public API names; lowercasing them hurts readability.
 "src/tennis/models/**" = ["N803", "N806"]
-"src/tennis/agents/modeling/**" = ["N806"]
+# M1b: the modeling agent passes ML design matrices (`X_model`) into helpers,
+# so the capital-`X` convention extends to N803 (argument names) here too.
+"src/tennis/agents/modeling/**" = ["N803", "N806"]
 
 [tool.mypy]
 python_version = "3.12"

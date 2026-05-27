@@ -178,6 +178,24 @@ class TestCrossVal:
         assert set(cv.oof_index) <= all_test
         assert len(cv.oof_mean) == len(cv.oof_index)
 
+    def test_per_learner_oof_aligned(self, real_config):
+        # M1b: per-learner OOF columns feed the stacker; both align with oof_index
+        # and the (n,2) design matrix has the right shape.
+        cfg = _shrink(real_config)
+        ds = _dataset()
+        split = build_walk_forward_splits(
+            dates=ds.dates, tournament_ids=ds.tournament_ids,
+            n_folds=2, min_train_seasons=1, tail_days=1,
+        )
+        cv = cross_val_oof(
+            ds.X, ds.y, ds.dates, split,
+            categorical_keys=_fs().categorical_keys, config=cfg,
+        )
+        n = len(cv.oof_index)
+        assert len(cv.oof_xgb) == n and len(cv.oof_lgbm) == n
+        assert cv.oof_matrix().shape == (n, 2)
+        assert np.all((cv.oof_xgb >= 0.0) & (cv.oof_xgb <= 1.0))
+
     def test_oof_metrics_finite(self, real_config):
         cfg = _shrink(real_config)
         ds = _dataset()

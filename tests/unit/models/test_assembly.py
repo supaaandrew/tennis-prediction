@@ -7,7 +7,11 @@ from datetime import UTC, date, datetime
 
 import pandas as pd
 
-from tennis.models.assembly import assemble_training_data
+from tennis.models.assembly import (
+    assemble_prediction_data,
+    assemble_training_data,
+    extract_categorical_categories,
+)
 from tennis.models.feature_set import ModelFeatureSet, compute_feature_hash
 from tennis.storage.postgres.rows import FeatureMatrixRow, MatchRow
 
@@ -202,3 +206,69 @@ class TestShape:
         )
         assert ds.n_rows == 0
         assert list(ds.X.columns) == list(_fs().keys)
+
+
+class TestCategoricalCapture:
+    def test_extract_categorical_categories(self):
+        ds = assemble_training_data(
+            matches=[_match(1, winner=1), _match(2, winner=1)],
+            feature_rows=[
+                _frow(1, _payload(surface_transition_type="same")),
+                _frow(2, _payload(surface_transition_type="clay->hard")),
+            ],
+            feature_set=_fs(),
+        )
+        cats = extract_categorical_categories(ds.X, _fs())
+        assert set(cats) == {"surface_transition_type"}
+        assert set(cats["surface_transition_type"]) == {"same", "clay->hard"}
+
+
+class TestPredictionAssembler:
+    _CATS = {"surface_transition_type": ("same", "clay->hard")}
+
+    def test_no_labels_match_ids_aligned(self):
+        # for_prediction matches are unlabelled (winner None); no `y` is produced.
+        pd_data = assemble_prediction_data(
+            matches=[_match(1, winner=None), _match(2, winner=None)],
+            feature_rows=[_frow(1, _payload()), _frow(2, _payload())],
+            feature_set=_fs(), categorical_categories=self._CATS,
+        )
+        assert pd_data.match_ids == (1, 2)
+        assert pd_data.n_rows == 2
+        assert not hasattr(pd_data, "y")
+
+    def test_pinned_categories_applied_unseen_is_nan(self):
+        # §M23: prediction frame reuses training categories; unseen → NaN, no crash.
+        pd_data = assemble_prediction_data(
+            matches=[_match(1, winner=None), _match(2, winner=None)],
+            feature_rows=[
+                _frow(1, _payload(surface_transition_type="same")),
+                _frow(2, _payload(surface_transition_type="grass")),  # unseen
+            ],
+            feature_set=_fs(), categorical_categories=self._CATS,
+        )
+        col = pd_data.X["surface_transition_type"]
+        assert list(col.cat.categories) == ["same", "clay->hard"]
+        assert col.iloc[0] == "same"
+        assert pd.isna(col.iloc[1])
+
+    def test_columns_equal_feature_set_keys_market_excluded(self):
+        # X is driven by feature_set.keys; a market key in the payload never
+        # reaches X (§M21a — read for edge only, never a model input).
+        pd_data = assemble_prediction_data(
+            matches=[_match(1, winner=None)],
+            feature_rows=[_frow(1, _payload(p1_implied_pinnacle_decision=0.6))],
+            feature_set=_fs(), categorical_categories=self._CATS,
+        )
+        assert list(pd_data.X.columns) == list(_fs().keys)
+        assert "p1_implied_pinnacle_decision" not in pd_data.X.columns
+
+    def test_missing_feature_row_dropped(self):
+        pd_data = assemble_prediction_data(
+            matches=[_match(1, winner=None), _match(2, winner=None)],
+            feature_rows=[_frow(1, _payload())],
+            feature_set=_fs(), categorical_categories=self._CATS,
+        )
+        assert pd_data.n_rows == 1
+        assert pd_data.match_ids == (1,)
+        assert pd_data.dropped_no_features == 1

@@ -43,10 +43,16 @@ _FATAL_CODES = frozenset(
         "staleness_halt",
         "preflight_error",
         "feature_matrix_invalid",
-        # Modeling (M1): both mean "no usable model was produced" -> 'failed'
-        # (not 'partial'), per AGENTS.md ModelingAgent status semantics.
+        # Modeling (M1): all mean "no usable model was produced / used" ->
+        # 'failed' (not 'partial'), per AGENTS.md ModelingAgent status semantics.
+        # `no_active_model` (M1b prediction mode) joins the set; the degraded
+        # path `calibration_degraded` deliberately stays OUT (→ 'partial').
         "insufficient_training_data",
         "modeling_db_error",
+        "no_active_model",
+        # M1b prediction: the active model's feature family no longer matches the
+        # config — the system is inconsistent, nothing usable can be scored.
+        "feature_set_mismatch",
     }
 )
 # Fixed, arbitrary key for the cluster-wide singleton advisory lock guarding the

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,9 @@ from typing import Any
 import joblib
 
 from tennis.models.base_learners import TrainedBaseLearners
+from tennis.models.calibration import Calibrator
 from tennis.models.feature_set import ModelFeatureSet
+from tennis.models.stacker import TrainedStacker
 
 # Microsecond resolution (not just seconds) so a same-second retrain/retry of the
 # same data window cannot collide on the `model_registry.version` PK. Still a
@@ -26,16 +28,22 @@ _VERSION_TIMESTAMP_FMT = "%Y%m%dT%H%M%S%fZ"
 
 @dataclass(frozen=True, slots=True)
 class TrainedModel:
-    """The serialized artifact: fitted base learners + the feature contract.
+    """The serialized artifact: base learners + stacker + calibrator + contract.
 
-    M1b extends this with the stacker + calibrator; the `feature_set` (keys +
-    `feature_hash`) is what makes the live scorer reconstruct the exact training
-    columns.
+    The `feature_set` (keys + `feature_hash`) is what makes the live scorer
+    reconstruct the exact training columns. `categorical_categories` pins the
+    training-frame `category` levels per categorical column (§M23) so the
+    prediction assembler re-applies identical codes (unseen → NaN). `stacker`/
+    `calibrator` default to `None` for the M1a base-only shape (still loadable);
+    every M1b model populates all three.
     """
 
     base_learners: TrainedBaseLearners
     feature_set: ModelFeatureSet
     algo: str
+    stacker: TrainedStacker | None = None
+    calibrator: Calibrator | None = None
+    categorical_categories: Mapping[str, tuple[Any, ...]] = field(default_factory=dict)
 
 
 def mint_version(

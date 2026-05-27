@@ -34,8 +34,9 @@ _ACTIVE_SPECS = [row for rows in _REGISTRY.values() for row in rows]
 # Fakes
 # ---------------------------------------------------------------------------
 class _FakeMatchRepo:
-    def __init__(self, finals, *, raise_storage=False):
+    def __init__(self, finals, *, scheduled=(), raise_storage=False):
         self._finals = list(finals)
+        self._scheduled = list(scheduled)
         self._raise = raise_storage
         self.for_training_calls = 0
 
@@ -44,6 +45,39 @@ class _FakeMatchRepo:
         if self._raise:
             raise StorageError("connect failed postgres://u:topsecret@db/x")
         return list(self._finals)
+
+    def for_prediction(self, *, as_of, lookforward_days):
+        if self._raise:
+            raise StorageError("connect failed postgres://u:topsecret@db/x")
+        return list(self._scheduled)
+
+
+class _FakePredictionRepo:
+    def __init__(self, *, raise_for=()):
+        self.rows: dict[tuple[int, str], object] = {}
+        self.upsert_calls = 0
+        self._raise_for = set(raise_for)
+
+    def upsert(self, row):
+        self.upsert_calls += 1
+        if row.match_id in self._raise_for:
+            raise StorageError("upsert failed postgres://u:topsecret@db/x")
+        self.rows[(row.match_id, row.model_version)] = row
+        return row
+
+    def get(self, *, match_id, model_version):
+        return self.rows.get((match_id, model_version))
+
+    def list_for_window(self, *, model_version, since, until):
+        return [r for (_, v), r in self.rows.items() if v == model_version]
+
+
+class _FakeDeadLetterRepo:
+    def __init__(self):
+        self.rows: list[object] = []
+
+    def append(self, row):
+        self.rows.append(row)
 
 
 class _FakeFeatureMatrixRepo:
@@ -100,7 +134,13 @@ def _shrink(config: AppConfig, *, artifact_dir: str) -> AppConfig:
                     "splits": md.splits.model_copy(
                         update={"min_train_seasons": 2, "n_folds": 2}
                     ),
-                    "calibration": md.calibration.model_copy(update={"tail_days": 1}),
+                    # tail_days ~200 carves the WHOLE last season as a
+                    # non-straddling calibration tail (one tournament/season in
+                    # the fixture), and a low min_calibration_samples lets that
+                    # 16-row tail calibrate → non-degraded success path.
+                    "calibration": md.calibration.model_copy(
+                        update={"tail_days": 200, "min_calibration_samples": 8}
+                    ),
                     "base_learners": md.base_learners.model_copy(
                         update={
                             "xgb": md.base_learners.xgb.model_copy(
@@ -239,12 +279,13 @@ class TestSuccess:
         assert row.feature_hash == expected
         assert result.metrics["feature_hash"] == expected
 
-    def test_algo_is_base_only(self, shrunk):
+    def test_algo_is_stacked(self, shrunk):
+        # M1b supersedes the M1a base-only tag with the stacked+calibrated algo.
         matches, frows = _training_set()
         reg = _FakeModelRegistryRepo()
         agent = _agent(shrunk, _FakeMatchRepo(matches), _FakeFeatureMatrixRepo(frows), reg)
         result = agent.run(_ctx(shrunk, []))
-        assert reg.rows[result.metrics["version"]].algo == "xgb+lgbm_base"
+        assert reg.rows[result.metrics["version"]].algo == "xgb+lgbm_stack_platt"
 
     def test_heartbeat_fired(self, shrunk):
         matches, frows = _training_set()
@@ -259,8 +300,10 @@ class TestSuccess:
         agent = _agent(shrunk, _FakeMatchRepo(matches), _FakeFeatureMatrixRepo(frows),
                        _FakeModelRegistryRepo())
         m = agent.run(_ctx(shrunk, [])).metrics
-        assert {"version", "feature_hash", "rows", "folds", "cv", "data_window",
-                "dropped"} <= set(m)
+        assert {"version", "feature_hash", "rows", "folds", "data_window", "dropped",
+                "logloss", "brier", "n_oof", "ece_oof", "roi_kelly", "roi_kelly_shin",
+                "roi_kelly_proportional", "tail_logloss", "tail_brier", "tail_ece",
+                "calibration_degraded"} <= set(m)
 
 
 class TestLabelHygiene:
@@ -341,3 +384,263 @@ class TestFailure:
         assert result.errors[0].code == "insufficient_training_data"
         assert reg.insert_calls == 0
         assert len(reg.activate_calls) == 0
+
+
+class TestCalibrationDegraded:
+    def test_empty_tail_returns_partial_but_activates(self, shrunk):
+        # tail_days=1 → the last season's tournament straddles the train/tail seam
+        # and is dropped from both → EMPTY tail → degraded passthrough → partial
+        # (pre-step 5.1). The model is STILL registered + active (served degraded).
+        cfg = shrunk.model_copy(
+            update={
+                "modeling": shrunk.modeling.model_copy(
+                    update={
+                        "calibration": shrunk.modeling.calibration.model_copy(
+                            update={"tail_days": 1}
+                        )
+                    }
+                )
+            }
+        )
+        matches, frows = _training_set()
+        reg = _FakeModelRegistryRepo()
+        agent = _agent(cfg, _FakeMatchRepo(matches), _FakeFeatureMatrixRepo(frows), reg)
+        result = agent.run(_ctx(cfg, []))
+        assert result.ok is False                       # → 'partial'
+        assert result.errors[0].code == "calibration_degraded"
+        assert result.metrics["calibration_degraded"] is True
+        assert reg.insert_calls == 1                     # still registered
+        assert reg.active() is not None                  # still served
+
+
+# ---------------------------------------------------------------------------
+# Prediction mode (M1b)
+# ---------------------------------------------------------------------------
+def _scheduled_set(n=4, *, with_odds=True):
+    matches: list[MatchRow] = []
+    frows: list[FeatureMatrixRow] = []
+    for k in range(n):
+        mid = 5000 + k
+        matches.append(
+            MatchRow(
+                match_id=mid, tournament_id=2027_000, round="R16",
+                match_date=date(2027, 6, 1 + k), p1_id=20 + k, p2_id=9020 + k,
+                status="scheduled", source="t", source_uid=f"s{k}", winner_id=None,
+                start_ts=datetime(2027, 6, 1 + k, 12, tzinfo=UTC),
+            )
+        )
+        payload = {
+            "elo_diff_blended": 0.8, "p1_elo_pre": 1600.0, "p1_elo_surface_pre": 1600.0,
+            "p2_elo_pre": 1500.0, "p2_elo_surface_pre": 1500.0,
+            "p1_elo_blended_pre": 1600.0, "p2_elo_blended_pre": 1500.0,
+            "p1_elo_reliability_low": False, "p2_elo_reliability_low": False,
+            "surface_transition_type": "same",
+        }
+        if with_odds:
+            payload["p1_implied_pinnacle_decision"] = 0.55       # Shin decision
+            payload["p1_implied_proportional_decision"] = 0.56
+            payload["p1_implied_pinnacle_opening"] = 0.54
+            payload["p1_implied_pinnacle_closing"] = 0.99        # must be ignored
+            payload["odds_drift_to_close"] = 0.42                # must be ignored
+        frows.append(
+            FeatureMatrixRow(
+                match_id=mid, feature_set="v1",
+                as_of_ts=datetime(2027, 5, 1, tzinfo=UTC), payload=payload,
+            )
+        )
+    return matches, frows
+
+
+def _train_active(shrunk) -> _FakeModelRegistryRepo:
+    """Train a real model so prediction mode has an active artifact to load."""
+    matches, frows = _training_set()
+    reg = _FakeModelRegistryRepo()
+    agent = _agent(shrunk, _FakeMatchRepo(matches), _FakeFeatureMatrixRepo(frows), reg)
+    assert agent.run(_ctx(shrunk, [])).ok is True
+    return reg
+
+
+def _pred_agent(shrunk, reg, sched_matches, sched_frows, pred_repo, dl_repo):
+    return ModelingAgent(
+        mode="prediction", config=shrunk,
+        match_repo=_FakeMatchRepo([], scheduled=sched_matches),
+        feature_matrix_repo=_FakeFeatureMatrixRepo(sched_frows),
+        feature_spec_repo=_FakeFeatureSpecRepo(), model_registry_repo=reg,
+        prediction_repo=pred_repo, dead_letter_repo=dl_repo,
+    )
+
+
+class TestModeConstruction:
+    def test_unknown_mode_raises(self, shrunk):
+        with pytest.raises(ValueError, match="unknown mode"):
+            ModelingAgent(
+                mode="bogus", config=shrunk, match_repo=_FakeMatchRepo([]),
+                feature_matrix_repo=_FakeFeatureMatrixRepo([]),
+                feature_spec_repo=_FakeFeatureSpecRepo(),
+                model_registry_repo=_FakeModelRegistryRepo(),
+            )
+
+    def test_prediction_mode_requires_repos(self, shrunk):
+        with pytest.raises(ValueError, match="requires prediction_repo"):
+            ModelingAgent(
+                mode="prediction", config=shrunk, match_repo=_FakeMatchRepo([]),
+                feature_matrix_repo=_FakeFeatureMatrixRepo([]),
+                feature_spec_repo=_FakeFeatureSpecRepo(),
+                model_registry_repo=_FakeModelRegistryRepo(),
+            )
+
+
+class TestPrediction:
+    def test_no_active_model_returns_failed(self, shrunk):
+        # prediction mode + empty registry → failed, ZERO writes, no exception.
+        reg = _FakeModelRegistryRepo()  # empty
+        sched, sfrows = _scheduled_set()
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        agent = _pred_agent(shrunk, reg, sched, sfrows, pred, dl)
+        result = agent.run(_ctx(shrunk, []))
+        assert result.ok is False
+        assert result.errors[0].code == "no_active_model"
+        assert pred.upsert_calls == 0
+
+    def test_base_only_model_not_servable_returns_failed(self, shrunk, tmp_path):
+        # An M1a base-only artifact (stacker/calibrator None) cannot be scored by
+        # M1b prediction → failed, zero writes (no crash on a None stacker).
+        from tennis.models.artifacts import TrainedModel, save_artifact
+        from tennis.models.base_learners import TrainedBaseLearners
+        from tennis.models.feature_set import resolve_model_feature_set
+
+        fs = resolve_model_feature_set(_ACTIVE_SPECS)
+        base_only = TrainedModel(
+            base_learners=TrainedBaseLearners(xgb={"x": 1}, lgbm={"l": 2}),
+            feature_set=fs, algo="xgb+lgbm_base",  # no stacker/calibrator
+        )
+        uri = save_artifact(base_only, artifact_dir=str(tmp_path / "m"), version="OLD")
+        reg = _FakeModelRegistryRepo()
+        reg.rows["OLD"] = ModelRegistryRow(
+            version="OLD", trained_at=_NOW, feature_set="v1", algo="xgb+lgbm_base",
+            hyperparams={}, metrics={}, artifact_uri=uri, feature_hash=fs.feature_hash,
+            data_window_start=date(2018, 1, 1), data_window_end=date(2019, 1, 1),
+            is_active=True,
+        )
+        sched, sfrows = _scheduled_set(n=2)
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        result = _pred_agent(shrunk, reg, sched, sfrows, pred, dl).run(_ctx(shrunk, []))
+        assert result.ok is False
+        assert result.errors[0].code == "no_active_model"
+        assert pred.upsert_calls == 0
+
+    def test_feature_set_mismatch_returns_failed(self, shrunk):
+        # Codex M1b HIGH: the active model's family must match config; a drift
+        # fails fast (zero writes) rather than scoring the wrong payloads.
+        reg = _train_active(shrunk)
+        v = next(iter(reg.rows))
+        reg.rows[v] = dataclasses.replace(reg.rows[v], feature_set="v_old")
+        sched, sfrows = _scheduled_set(n=2)
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        result = _pred_agent(shrunk, reg, sched, sfrows, pred, dl).run(_ctx(shrunk, []))
+        assert result.ok is False
+        assert result.errors[0].code == "feature_set_mismatch"
+        assert pred.upsert_calls == 0
+
+    def test_one_bad_row_isolated_others_written(self, shrunk):
+        # Codex M1b HIGH: a row-level scoring fault must not abort the slate —
+        # it is dead-lettered while the other rows still upsert (per-match §L2).
+        reg = _train_active(shrunk)
+        sched, sfrows = _scheduled_set(n=3)
+        sfrows[1].payload["p1_implied_pinnacle_decision"] = "not_a_number"
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        result = _pred_agent(shrunk, reg, sched, sfrows, pred, dl).run(_ctx(shrunk, []))
+        assert len(pred.rows) == 2          # the two good rows still written
+        assert len(dl.rows) == 1            # the bad row isolated + dead-lettered
+        assert result.ok is False           # → partial
+
+    def test_scores_and_writes_predictions(self, shrunk):
+        reg = _train_active(shrunk)
+        sched, sfrows = _scheduled_set(n=3)
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        result = _pred_agent(shrunk, reg, sched, sfrows, pred, dl).run(_ctx(shrunk, []))
+        assert result.ok is True
+        assert pred.upsert_calls == 3
+        assert result.metrics["n_predictions"] == 3
+        # probabilities are valid + in range.
+        for row in pred.rows.values():
+            assert 0.0 <= row.p1_prob_cal <= 1.0
+
+    def test_live_rows_closing_fields_always_null(self, shrunk):
+        # §M19/§15.4: even though the payload carries closing+drift values, every
+        # written live row NULLs them globally.
+        reg = _train_active(shrunk)
+        sched, sfrows = _scheduled_set(n=3, with_odds=True)
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        _pred_agent(shrunk, reg, sched, sfrows, pred, dl).run(_ctx(shrunk, []))
+        assert pred.rows
+        for row in pred.rows.values():
+            assert row.p1_implied_close is None
+            assert row.odds_drift_to_close is None
+
+    def test_missing_odds_edge_null_but_written(self, shrunk):
+        # C9: no market keys → edge_* NULL, prediction STILL written.
+        reg = _train_active(shrunk)
+        sched, sfrows = _scheduled_set(n=2, with_odds=False)
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        result = _pred_agent(shrunk, reg, sched, sfrows, pred, dl).run(_ctx(shrunk, []))
+        assert result.ok is True
+        assert pred.upsert_calls == 2
+        for row in pred.rows.values():
+            assert row.edge_p1_shin is None
+            assert row.kelly_fraction_p1 is None  # no usable odds → NULL
+
+    def test_no_feature_row_dead_lettered(self, shrunk):
+        reg = _train_active(shrunk)
+        sched, sfrows = _scheduled_set(n=3)
+        sfrows = sfrows[:2]  # drop the 3rd match's feature row
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        result = _pred_agent(shrunk, reg, sched, sfrows, pred, dl).run(_ctx(shrunk, []))
+        assert pred.upsert_calls == 2
+        assert len(dl.rows) == 1
+        assert result.ok is False  # → partial (a match was dead-lettered)
+
+    def test_upsert_storage_error_dead_lettered(self, shrunk):
+        reg = _train_active(shrunk)
+        sched, sfrows = _scheduled_set(n=3)
+        pred = _FakePredictionRepo(raise_for={5001})  # one row fails to upsert
+        dl = _FakeDeadLetterRepo()
+        result = _pred_agent(shrunk, reg, sched, sfrows, pred, dl).run(_ctx(shrunk, []))
+        assert len(pred.rows) == 2          # 2 succeeded
+        assert len(dl.rows) == 1            # 1 dead-lettered
+        assert result.ok is False           # → partial
+        # §L10: credential scrubbed from the dead-letter cause.
+        assert "topsecret" not in str(dl.rows[0].error)
+
+    def test_upsert_idempotent(self, shrunk):
+        reg = _train_active(shrunk)
+        sched, sfrows = _scheduled_set(n=2)
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        agent = _pred_agent(shrunk, reg, sched, sfrows, pred, dl)
+        agent.run(_ctx(shrunk, []))
+        agent.run(_ctx(shrunk, []))  # re-run same slate
+        assert len(pred.rows) == 2  # keyed on (match_id, model_version) — no dupes
+
+    def test_metrics_omit_roi_kelly_surface_tail(self, shrunk):
+        reg = _train_active(shrunk)
+        sched, sfrows = _scheduled_set(n=2)
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        m = _pred_agent(shrunk, reg, sched, sfrows, pred, dl).run(_ctx(shrunk, [])).metrics
+        assert "roi_kelly" not in m                       # training-only (pre-step 6.2)
+        assert {"tail_logloss", "tail_brier", "tail_ece", "n_predictions",
+                "n_bets", "same_day_kelly_exposure"} <= set(m)
+
+    def test_noise_not_applied_in_prediction_mode(self, shrunk, monkeypatch):
+        # H1 / pre-step 5.5: noise is training-only; the predict path must never
+        # touch the feature matrix with noise.
+        import tennis.agents.modeling.agent as agent_mod
+
+        reg = _train_active(shrunk)
+        calls: list[int] = []
+        monkeypatch.setattr(
+            agent_mod, "apply_noise", lambda X, config: calls.append(1) or X
+        )
+        sched, sfrows = _scheduled_set(n=2)
+        pred, dl = _FakePredictionRepo(), _FakeDeadLetterRepo()
+        _pred_agent(shrunk, reg, sched, sfrows, pred, dl).run(_ctx(shrunk, []))
+        assert calls == []  # apply_noise never invoked on the prediction path

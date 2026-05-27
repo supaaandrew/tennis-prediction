@@ -227,6 +227,34 @@ class TestStatusPersisted:
         row = runs.get(run_id=agent.ctx.run_id, agent="data")  # type: ignore[union-attr]
         assert row is not None and row.status == "failed"  # not left 'running'
 
+    def test_no_active_model_ends_failed(self, config: AppConfig) -> None:
+        # M1b prediction mode: no usable model → 'failed' (in _FATAL_CODES).
+        runs = _FakeRuns()
+        agent = _FakeAgent(AgentResult(
+            ok=False, metrics={},
+            errors=(AgentError(code="no_active_model", message="none"),),
+        ))
+        assert _pipeline(config, runs, agent).run_once() == "failed"
+
+    def test_calibration_degraded_ends_partial(self, config: AppConfig) -> None:
+        # M1b: degraded calibration → 'partial' (NOT in _FATAL_CODES) — the model
+        # is still served uncalibrated.
+        runs = _FakeRuns()
+        agent = _FakeAgent(AgentResult(
+            ok=False, metrics={},
+            errors=(AgentError(code="calibration_degraded", message="degraded"),),
+        ))
+        assert _pipeline(config, runs, agent).run_once() == "partial"
+
+
+class TestFatalCodes:
+    def test_membership(self) -> None:
+        # pre-step 6.1: no_active_model is fatal; calibration_degraded is not.
+        from tennis.agents.orchestrator.pipeline import _FATAL_CODES
+
+        assert "no_active_model" in _FATAL_CODES
+        assert "calibration_degraded" not in _FATAL_CODES
+
 
 # ---------------------------------------------------------------------------
 # T15 — DB unavailable at startup

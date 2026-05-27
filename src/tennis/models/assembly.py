@@ -152,3 +152,114 @@ def _build_frame(
             )
     # Construct with an explicit column order == feature_set.keys (deterministic).
     return pd.DataFrame(data, columns=list(feature_set.keys))
+
+
+def extract_categorical_categories(
+    X: pd.DataFrame, feature_set: ModelFeatureSet
+) -> dict[str, tuple[object, ...]]:
+    """Capture the training-frame `category` levels per categorical column (§M23).
+
+    Stored in `TrainedModel.categorical_categories` and re-applied at predict time
+    so the integer codes XGB/LGBM consume are identical between train and serve.
+    """
+    return {
+        key: tuple(X[key].cat.categories.tolist())
+        for key in feature_set.categorical_keys
+        if key in X.columns
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class AssembledPredictionData:
+    """The assembled prediction matrix + the match ids it scores.
+
+    `X` columns are exactly `feature_set.keys` (sorted), dtype-cast with the
+    pinned training categories (§M23). `match_ids` is row-aligned with `X`; the
+    agent pairs each prediction with its match and reads the market implied probs
+    (excluded from X, §M21a) straight from that match's payload for the edge step.
+    No `y` — `for_prediction` matches are unlabelled (C4 scheduled/live).
+    """
+
+    X: pd.DataFrame
+    match_ids: tuple[int, ...]
+    dropped_no_features: int
+
+    @property
+    def n_rows(self) -> int:
+        return len(self.match_ids)
+
+
+def assemble_prediction_data(
+    *,
+    matches: Sequence[MatchRow],
+    feature_rows: Sequence[FeatureMatrixRow],
+    feature_set: ModelFeatureSet,
+    categorical_categories: Mapping[str, tuple[object, ...]],
+) -> AssembledPredictionData:
+    """Build the unlabelled `(X, match_ids)` prediction dataset.
+
+    `feature_set` MUST be the loaded `TrainedModel.feature_set` (§M23 / pre-step
+    5.4) — NOT a freshly resolved set — so a catalog change between training and
+    prediction cannot shift columns out from under the serialized model. Matches
+    with no feature row are dropped (the agent dead-letters them); winner-based
+    label filters do not apply (the slate is unlabelled).
+    """
+    payloads: dict[int, Mapping[str, object]] = {
+        row.match_id: row.payload for row in feature_rows
+    }
+    keys = feature_set.keys
+    columns: dict[str, list[object]] = {k: [] for k in keys}
+    match_ids: list[int] = []
+    dropped_no_features = 0
+
+    for match in matches:
+        payload = payloads.get(match.match_id)
+        if payload is None:
+            dropped_no_features += 1
+            continue
+        for k in keys:
+            columns[k].append(payload.get(k))
+        match_ids.append(match.match_id)
+
+    X = _build_prediction_frame(columns, feature_set, categorical_categories)
+    _logger.info(
+        "modeling_prediction_assembly_complete",
+        rows=len(match_ids),
+        features=len(keys),
+        dropped_no_features=dropped_no_features,
+    )
+    return AssembledPredictionData(
+        X=X,
+        match_ids=tuple(match_ids),
+        dropped_no_features=dropped_no_features,
+    )
+
+
+def _build_prediction_frame(
+    columns: Mapping[str, list[object]],
+    feature_set: ModelFeatureSet,
+    categorical_categories: Mapping[str, tuple[object, ...]],
+) -> pd.DataFrame:
+    """Cast each column per dtype, pinning categorical levels (§M23).
+
+    Categorical columns use `CategoricalDtype(categories=training_cats)` so codes
+    match train↔serve; an unseen category maps to NaN (native missing), never a
+    crash or a silent code remap.
+    """
+    data: dict[str, pd.Series] = {}
+    for key in feature_set.keys:
+        raw = columns[key]
+        if key in feature_set.categorical_keys:
+            cats = list(categorical_categories.get(key, ()))
+            dtype = pd.CategoricalDtype(categories=cats, ordered=False)
+            # Mask unseen levels to None BEFORE the cast so the result is an
+            # honest NaN (§M23) without the (future-raising) "values not in
+            # categories" cast warning — the cast then sees only known levels.
+            series = pd.Series(raw, dtype="object")
+            series = series.where(series.isin(cats), other=None)
+            data[key] = series.astype(dtype)
+        else:
+            data[key] = pd.Series(
+                [_numeric_value(v) for v in raw], dtype="float64"
+            )
+    return pd.DataFrame(data, columns=list(feature_set.keys))

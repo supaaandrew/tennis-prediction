@@ -94,6 +94,40 @@ class TestPersistence:
         with pytest.raises(TypeError, match="not a TrainedModel"):
             load_artifact(str(bad))
 
+    def test_stacked_model_roundtrip(self, tmp_path):
+        # M1b: stacker + calibrator + pinned categories (§M23) survive joblib IO.
+        import numpy as np
+
+        from tennis.models.calibration import Calibrator
+        from tennis.models.stacker import train_stacker
+
+        keys = ("a", "b")
+        fs = ModelFeatureSet(
+            keys=keys, categorical_keys=frozenset({"b"}),
+            dtype_by_key={"a": "float", "b": "cat"},
+            feature_hash=compute_feature_hash(keys),
+        )
+        rng = np.random.default_rng(0)
+        oof = rng.uniform(0, 1, size=(80, 2))
+        y = (oof[:, 0] + oof[:, 1] > 1.0).astype(int)
+        from tennis.core.config import load_config
+        cfg = load_config(Path(__file__).resolve().parents[3] / "config" / "config.yaml")
+        stacker = train_stacker(oof_matrix=oof, y_oof=y, config=cfg)
+        calibrator = Calibrator(method="passthrough", model=None, degraded=True, n_samples=0)
+        model = TrainedModel(
+            base_learners=TrainedBaseLearners(xgb={"x": 1}, lgbm={"l": 2}),
+            feature_set=fs, algo="xgb+lgbm_stack_platt",
+            stacker=stacker, calibrator=calibrator,
+            categorical_categories={"b": ("clay", "hard")},
+        )
+        uri = save_artifact(model, artifact_dir=str(tmp_path), version="v1b")
+        loaded = load_artifact(uri)
+        assert loaded.algo == "xgb+lgbm_stack_platt"
+        assert loaded.categorical_categories == {"b": ("clay", "hard")}
+        assert loaded.calibrator.degraded is True
+        p = loaded.stacker.predict_p1({"xgb": oof[:, 0], "lgbm": oof[:, 1]})
+        assert p.min() >= 0.0 and p.max() <= 1.0
+
 
 class TestHyperparams:
     def test_snapshot_shape(self, real_config):

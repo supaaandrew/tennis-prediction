@@ -392,6 +392,10 @@ class ModelingSection(_Section):
     # under this dir. Relative paths resolve against the process working dir.
     # Must be non-empty — an empty dir would serialize artifacts to the CWD root.
     artifact_dir: str = Field(default="artifacts/models", min_length=1)
+    # §M22: seed for the H1 training-noise RNG (np.random.default_rng). Training
+    # noise is stochastic by design; a fixed seed makes each retrain — and the
+    # unit suite — reproducible. Read by `models/noise.py` only.
+    random_seed: int = 42
 
 
 class DecisionTimingSection(_Section):

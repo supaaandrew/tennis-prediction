@@ -1000,3 +1000,44 @@ feature_hash dtype-drift deferral note).
 write; plus the REAL H1 noise injection (replacing the `apply_noise` stub) and the categorical
 train/predict code-consistency pin. Reuses M1a's assembly/splits/base_learners/feature_set
 unchanged.
+
+## Session 2026-05-26 — Modeling Agent M1b (scoring: stacking + calibration + edge + Kelly + predictions)
+**Prompt:** Build M1b — the scoring half of the Modeling Agent: stack the base learners,
+calibrate on the held-out tail, compute edges vs implied odds, size fractional Kelly, write
+`predictions`, replace the H1 noise stub with real injection, and add a prediction MODE. Lock
+§M22/§M23/§M24 first; confirm `noise_sigma_by_bucket` config; add the no-active-model + closing-
+fields-NULL gotchas and two tests; then plan.
+**Shipped:** 1052 → **1112 unit tests** (+60, ~19s, no Docker). New `src/tennis/models/`:
+`stacker.py` (logistic meta-learner over per-learner OOF; single-class-OOF guard), `calibration.py`
+(Platt/isotonic on the tail; empty/small/single-class → degraded passthrough → `partial`),
+`edge.py` (Shin+proportional edge vs payload implied; C9 NULL), `kelly.py` (per-match + same-day
+pro-rata caps §M24/H12; Shin→proportional fallback; NULL/0.0 no-bet), `metrics.py` (ECE +
+Kelly-ROI backtest). New `src/tennis/core/weather_uncertainty.py` (§M15 band logic extracted from
+`conditions.py` so `noise.py` shares it without a models→agents import; conditions re-exports).
+Extended: `noise.py` (real seeded per-bucket §M22 injection, training-only), `base_learners.py`
+(`CVResult` per-learner `oof_xgb`/`oof_lgbm` + `oof_matrix()`), `assembly.py` (prediction assembler
+bound to `model.feature_set`, §M23 pinned cats, + `extract_categorical_categories`), `artifacts.py`
+(`TrainedModel` + stacker/calibrator/`categorical_categories`; algo `xgb+lgbm_stack_platt`),
+`agents/modeling/agent.py` (`mode` ctor flag; training=assemble→CV→stack→calibrate→register+activate,
+prediction=load active→score→edge→Kelly→`predictions` with per-match fault isolation + global
+§M19 closing-NULLs). `pipeline._FATAL_CODES` += `no_active_model`, `feature_set_mismatch`
+(`calibration_degraded` stays OUT → `partial`). `config.modeling.random_seed=42` added.
+**Codex findings:** 0 CRITICAL / 3 HIGH. **HIGH (fixed)** — prediction read the matrix under the
+live-config feature_set instead of the active model's → fail-fast `feature_set_mismatch` +
+artifact-bound matrix read (§M25a). **HIGH (fixed)** — batch predict sat outside the per-match
+try/except → moved to per-row scoring inside isolation + a non-finite-prob guard before upsert
+(§M25b/c). **HIGH (documented, not changed)** — "noise applied before CV": triaged PARTIALLY
+VALID/design-judgment — consistent noising across CV/stacker/tail/final keeps the stacker aligned
+with the deployed noised-trained base learners (clean-CV would mismatch them); recorded in §M22.
+Auto-review (RUN REVIEW): ✅ 0 CRITICAL.
+**New locked decisions:** M22 (H1 noise sigma from the decision-offset bucket, seeded; CV runs on
+the noised frame — intentional) + M23 (categorical code pinning; prediction assembler bound to
+`model.feature_set`; unseen→NaN) + M24 (Kelly same-day cap = `predicted_at.date()`, pro-rata, both
+caps always; Shin→proportional; NULL/0.0 no-bet) + M25 (prediction-mode hardening: feature_set
+guard, per-match scoring isolation, non-finite guard, base-only servability guard).
+**Next:** **Briefing Agent** (`agents/briefing/`) — Claude API summarization + RAG over prior
+human-edited notes + edge/Kelly email render (C13 disclaimer), consuming the `predictions` rows
+M1b writes. Also still open: orchestrator wiring (DI adapter-factory + cron → `DailyPipeline.run_once()`;
+sequential multi-agent loop under one `run_id`). NB the daily pipeline runs ModelingAgent in
+**prediction** mode — **training** is a separate prerequisite job (M1b's `no_active_model` /
+`feature_set_mismatch` gates fail-fast without an active model).

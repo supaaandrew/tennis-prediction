@@ -77,13 +77,25 @@ def _positive_proba(model: Any, X: pd.DataFrame) -> np.ndarray:
 
 @dataclass(frozen=True, slots=True)
 class CVResult:
-    """Out-of-fold predictions (for the M1b stacker) + CV metrics."""
+    """Out-of-fold predictions (for the M1b stacker) + CV metrics.
+
+    `oof_xgb`/`oof_lgbm` are the per-learner OOF columns — the M1b stacker's
+    training features (`LogisticRegression` over `[oof_xgb, oof_lgbm]`). `oof_mean`
+    is their average, the M1a CV-metrics probability. All three are row-aligned
+    with `oof_index`.
+    """
 
     oof_index: tuple[int, ...]
     oof_mean: np.ndarray
+    oof_xgb: np.ndarray
+    oof_lgbm: np.ndarray
     metrics: Mapping[str, float]
     n_folds: int
     degenerate_folds: int = 0
+
+    def oof_matrix(self) -> np.ndarray:
+        """The `(n_oof, 2)` per-learner OOF design matrix for the stacker."""
+        return np.column_stack([self.oof_xgb, self.oof_lgbm])
 
 
 def chrono_eval_split(dates_train: Sequence[date]) -> tuple[list[int], list[int]] | None:
@@ -200,6 +212,8 @@ def cross_val_oof(
     """
     oof_pos: list[int] = []
     oof_pred: list[float] = []
+    oof_xgb: list[float] = []
+    oof_lgbm: list[float] = []
     degenerate = 0
     for train_idx, test_idx in split.folds:
         if heartbeat is not None:
@@ -218,9 +232,11 @@ def cross_val_oof(
             categorical_keys=categorical_keys,
             config=config,
         )
-        preds = trained.predict_p1(X.iloc[list(test_idx)])["mean"]
+        preds = trained.predict_p1(X.iloc[list(test_idx)])
         oof_pos.extend(test_idx)
-        oof_pred.extend(preds.tolist())
+        oof_pred.extend(preds["mean"].tolist())
+        oof_xgb.extend(preds["xgb"].tolist())
+        oof_lgbm.extend(preds["lgbm"].tolist())
 
     oof_mean = np.asarray(oof_pred, dtype="float64")
     y_oof = y.iloc[oof_pos].to_numpy() if oof_pos else np.asarray([], dtype="int64")
@@ -232,6 +248,8 @@ def cross_val_oof(
     return CVResult(
         oof_index=tuple(oof_pos),
         oof_mean=oof_mean,
+        oof_xgb=np.asarray(oof_xgb, dtype="float64"),
+        oof_lgbm=np.asarray(oof_lgbm, dtype="float64"),
         metrics=metrics,
         n_folds=len(split.folds),
         degenerate_folds=degenerate,
