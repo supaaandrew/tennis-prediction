@@ -29,6 +29,7 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from tennis.storage.postgres.rows import (
+    BriefingDeliveryRow,
     DeadLetterRow,
     DevigMethod,
     EloSnapshotRow,
@@ -298,6 +299,22 @@ class PredictionRepository(Protocol):
     def list_for_window(
         self, *, model_version: str, since: datetime, until: datetime
     ) -> Sequence[PredictionRow]: ...
+
+
+@runtime_checkable
+class BriefingDeliveryRepository(Protocol):
+    """Email-delivery idempotency (§N5/§S5). The BriefingAgent `get`s before
+    send (skip if a row exists) and `record`s after a confirmed send."""
+
+    def get(
+        self, *, briefing_day_utc: date, model_version: str
+    ) -> BriefingDeliveryRow | None: ...
+
+    def record(self, row: BriefingDeliveryRow) -> None:
+        """Insert the delivery marker; a duplicate `(briefing_day_utc,
+        model_version)` is a no-op (INSERT … ON CONFLICT DO NOTHING). A DB/IO
+        failure raises a TYPED `StorageError`."""
+        ...
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -1006,3 +1007,83 @@ class TestMatchListForIds:
         # Empty fast-path (contract): returns {} without touching the DB.
         matches = MatchRepositoryImpl(session_factory)
         assert matches.list_for_ids(match_ids=[]) == {}
+
+
+# ---------------------------------------------------------------------------
+# BriefingDeliveryRepository — §N5/§S5 email-delivery idempotency
+# ---------------------------------------------------------------------------
+def _seed_model(repo, *, version: str):
+    from tennis.storage.postgres.rows import ModelRegistryRow
+
+    row = ModelRegistryRow(
+        version=version,
+        trained_at=datetime(2026, 5, 26, 6, 30, tzinfo=UTC),
+        feature_set="v1",
+        algo="xgb+lgbm_stack_isotonic",
+        hyperparams={},
+        metrics={"tail_ece": 0.03},
+        artifact_uri="file:///models/x.joblib",
+        feature_hash="abc123",
+        data_window_start=date(2016, 1, 1),
+        data_window_end=date(2019, 12, 31),
+        is_active=False,
+    )
+    return repo.insert(row)
+
+
+class TestBriefingDeliveryRepository:
+    def test_record_then_get_round_trip(self, session_factory: Any) -> None:
+        from tennis.storage.postgres.impl import (
+            BriefingDeliveryRepositoryImpl,
+            ModelRegistryRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import BriefingDeliveryRow
+
+        version = "bd-roundtrip-v1"
+        _seed_model(ModelRegistryRepositoryImpl(session_factory), version=version)
+        repo = BriefingDeliveryRepositoryImpl(session_factory)
+        day = date(2026, 5, 26)
+
+        assert repo.get(briefing_day_utc=day, model_version=version) is None
+        repo.record(
+            BriefingDeliveryRow(
+                briefing_day_utc=day,
+                model_version=version,
+                run_id=uuid4(),
+                sent_at=datetime(2026, 5, 26, 6, 30, tzinfo=UTC),
+            )
+        )
+        got = repo.get(briefing_day_utc=day, model_version=version)
+        assert got is not None
+        assert got.briefing_day_utc == day
+        assert got.model_version == version
+        assert got.id is not None
+
+    def test_record_is_idempotent_on_conflict(self, session_factory: Any) -> None:
+        """A second `record` for the same (briefing_day_utc, model_version) is a
+        silent no-op — the original row (and its run_id) is preserved (§S5)."""
+        from tennis.storage.postgres.impl import (
+            BriefingDeliveryRepositoryImpl,
+            ModelRegistryRepositoryImpl,
+        )
+        from tennis.storage.postgres.rows import BriefingDeliveryRow
+
+        version = "bd-conflict-v1"
+        _seed_model(ModelRegistryRepositoryImpl(session_factory), version=version)
+        repo = BriefingDeliveryRepositoryImpl(session_factory)
+        day = date(2026, 5, 27)
+
+        def _row(run):
+            return BriefingDeliveryRow(
+                briefing_day_utc=day,
+                model_version=version,
+                run_id=run,
+                sent_at=datetime(2026, 5, 27, 6, 30, tzinfo=UTC),
+            )
+
+        first = uuid4()
+        repo.record(_row(first))
+        repo.record(_row(uuid4()))  # no-op on conflict
+        got = repo.get(briefing_day_utc=day, model_version=version)
+        assert got is not None
+        assert got.run_id == first

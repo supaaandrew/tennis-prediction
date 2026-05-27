@@ -401,6 +401,33 @@ class Prediction(Base):
     )
 
 
+class BriefingDelivery(Base):
+    """Email-delivery idempotency marker (migration 013, §N5/§S5).
+
+    One row per delivered briefing. `UNIQUE(briefing_day_utc, model_version)`
+    is the idempotency key; `run_id` is audit-only.
+    """
+
+    __tablename__ = "briefing_deliveries"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    briefing_day_utc: Mapped[date] = mapped_column(Date, nullable=False)
+    model_version: Mapped[str] = mapped_column(
+        Text, ForeignKey("model_registry.version"), nullable=False
+    )
+    run_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "briefing_day_utc", "model_version", name="briefing_deliveries_day_model_key"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Migration 006 / 009 — pipeline_runs + ingest_watermarks + dead_letter
 # ---------------------------------------------------------------------------

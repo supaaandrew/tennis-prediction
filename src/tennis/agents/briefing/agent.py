@@ -30,8 +30,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
+from uuid import UUID
 
 from tennis.core.config import AppConfig
 from tennis.core.contracts import AgentContext, AgentError, AgentResult
@@ -39,6 +40,7 @@ from tennis.core.errors import StorageError
 from tennis.core.lineage import AgentLineage, HeartbeatPolicy, Precondition
 from tennis.core.logging import get_logger, redact_text
 from tennis.storage.postgres.repositories import (
+    BriefingDeliveryRepository,
     DeadLetterRepository,
     FeatureMatrixRepository,
     MatchRepository,
@@ -47,7 +49,11 @@ from tennis.storage.postgres.repositories import (
     PredictionRepository,
     TournamentRepository,
 )
-from tennis.storage.postgres.rows import DeadLetterRow, PredictionRow
+from tennis.storage.postgres.rows import (
+    BriefingDeliveryRow,
+    DeadLetterRow,
+    PredictionRow,
+)
 
 from tennis.agents.briefing.email_client import EmailClient
 from tennis.agents.briefing.llm_client import LlmClient
@@ -72,6 +78,7 @@ class BriefingAgent:
         tournament_repo: TournamentRepository,
         feature_matrix_repo: FeatureMatrixRepository,
         dead_letter_repo: DeadLetterRepository,
+        briefing_delivery_repo: BriefingDeliveryRepository,
         llm_client: LlmClient,
         email_client: EmailClient,
     ) -> None:
@@ -83,6 +90,7 @@ class BriefingAgent:
         self._tournament_repo = tournament_repo
         self._feature_matrix_repo = feature_matrix_repo
         self._dead_letter_repo = dead_letter_repo
+        self._briefing_delivery_repo = briefing_delivery_repo
         self._llm_client = llm_client
         self._email_client = email_client
         self._feature_set_name = config.features.feature_set
@@ -162,6 +170,37 @@ class BriefingAgent:
                 ),
             )
 
+        # §N5/§S5: durable email-delivery idempotency. A prior run that already
+        # delivered this day's briefing for this model leaves a row; a manual
+        # re-run or a crash-after-send must NOT re-send. Checked here — before
+        # the payload reads, LLM call, render, and send — so a re-run is cheap.
+        # A StorageError propagates to `run()` → `briefing_db_error` (fatal, no
+        # send): fail-closed, never double-send on an indeterminate DB.
+        briefing_day = ctx.as_of.date()
+        if (
+            self._briefing_delivery_repo.get(
+                briefing_day_utc=briefing_day, model_version=active.version
+            )
+            is not None
+        ):
+            _logger.info(
+                "briefing_already_delivered",
+                briefing_day_utc=briefing_day.isoformat(),
+                model_version=active.version,
+            )
+            return AgentResult(
+                ok=True,
+                metrics={
+                    "model_version": active.version,
+                    "n_slate": len(rows),
+                    "n_qualifying": len(qualifying),
+                    "n_surfaced": 0,
+                    "already_delivered": True,
+                    "email_sent": False,
+                },
+                errors=(),
+            )
+
         ctx.heartbeat()
         payloads = self._payloads_for([c.row.match_id for c in surfaced_classified])
         surfaced: list[SurfacedMatch] = []
@@ -236,6 +275,16 @@ class BriefingAgent:
                 ),
             )
 
+        # §N5/§S5: record the delivery AFTER a confirmed send. Best-effort — a
+        # failure here must NOT flip a genuinely-sent briefing to `failed`; the
+        # narrow crash-between-send-and-record window is the accepted residual.
+        self._record_delivery(
+            briefing_day=briefing_day,
+            model_version=active.version,
+            run_id=ctx.run_id,
+            sent_at=ctx.as_of,
+        )
+
         n_no_market = sum(1 for m in surfaced if m.no_market)
         metrics: dict[str, Any] = {
             "model_version": active.version,
@@ -268,6 +317,42 @@ class BriefingAgent:
         return AgentResult(ok=True, metrics=metrics, errors=())
 
     # -- helpers ------------------------------------------------------------
+    def _record_delivery(
+        self,
+        *,
+        briefing_day: date,
+        model_version: str,
+        run_id: UUID,
+        sent_at: datetime,
+    ) -> None:
+        """Persist the delivery marker AFTER a confirmed send (§N5/§S5).
+
+        Best-effort: every exception (including a `StorageError`) is logged and
+        swallowed — a record failure must not flip a genuinely-sent briefing to
+        `failed`. The narrow window between SMTP-OK and this write is the accepted
+        irreducible §S5 residual; a re-run in that window may re-send. The failure
+        is logged at ERROR as a **pageable** `briefing_delivery_record_failed`
+        signal so an operator can repair idempotency state before the next run.
+        """
+        try:
+            self._briefing_delivery_repo.record(
+                BriefingDeliveryRow(
+                    briefing_day_utc=briefing_day,
+                    model_version=model_version,
+                    run_id=run_id,
+                    sent_at=sent_at,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort, never propagate
+            # ERROR (not WARNING): the email WENT OUT but the idempotency marker
+            # did not persist, so a rerun may re-send. Page on this (§S5).
+            _logger.error(
+                "briefing_delivery_record_failed",
+                briefing_day_utc=briefing_day.isoformat(),
+                model_version=model_version,
+                cause=_safe_cause(exc),
+            )
+
     def _payloads_for(self, match_ids: Sequence[int]) -> Mapping[int, Mapping[str, Any]]:
         """Bulk feature-payload read for narrative grounding (non-critical).
 

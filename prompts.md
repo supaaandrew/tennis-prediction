@@ -1131,3 +1131,49 @@ cron shim invoking `DailyPipeline.run_once()`, plus the sequential multi-agent l
 Modeling(prediction) → Briefing → **Monitor**, all now built). Owns **§N5** email-delivery
 idempotency/outbox. NB the daily pipeline runs ModelingAgent in **prediction** mode — **training** is
 a separate prerequisite job (`no_active_model`/`feature_set_mismatch` fail-fast otherwise).
+
+## Session 2026-05-27 — Orchestrator wiring (§S): end-to-end daily run, train/run CLI, §N5 resolved
+**Prompt:** Build the deferred orchestrator-wiring session — the sequential multi-agent loop under
+one shared `run_id`, the `python -m tennis train` / `run` CLI + DI composition root, and RESOLVE §N5
+(email-delivery idempotency, the final deferral) — locking it all as a new §S namespace; confirm five
+pre-build items (next free letter, §N5 migration number, training entrypoint, bootstrap sequence,
+precondition table) before building.
+**Shipped:** 8 NEW files — `migrations/versions/013_briefing_deliveries.py`; `src/tennis/composition.py`
+(`build_training_chain`/`build_daily_chain`, the DI root); `src/tennis/cli.py` (typer `train`/`run`) +
+`src/tennis/__main__.py` (`python -m tennis`); `src/tennis/adapters/http_client.py` (NEW concrete
+`HttpxClient` — the one missing `core.contracts.HttpClient`, the only transport piece that did not
+exist); `tests/unit/{test_cli,test_composition}.py` + `tests/unit/adapters/test_http_client.py`.
+Modified: `DailyPipeline` → `agents: Sequence[Agent]` multi-agent loop (ONE run_id / §L7 lock /
+orphan-sweep; precondition-not-met → SKIP no-row + continue; `run()`-raise → record `failed` +
+continue so Monitor still runs; returns the AGGREGATE RunStatus); `BriefingAgent` + storage layer
+(`BriefingDeliveryRow`/Protocol/`BriefingDeliveryRepositoryImpl`/ORM) for the `briefing_deliveries`
+idempotency guard. `typer` installed into the venv (declared in pyproject, was absent). Tests
+**1177 → 1209 (+32 unit; +2 Docker-gated integration)**, full unit green (~30s incl. ML).
+**Codex findings:** RUN REVIEW (review.md) 0 CRITICAL / 2 HIGH — **H1 (fixed)** per-agent `started_at`
+used the pinned `as_of` not the real clock (§L4) → `self._real_clock.now()`; **H2 (fixed)**
+`_singleton_lock` manual `cm.__enter__/__exit__` → canonical `with`. Adversarial
+/codex:adversarial-review 0 CRITICAL / 1 HIGH / 1 MEDIUM + 1 reviewer-found gap, all triaged:
+**HIGH** swallowed record-after-send → duplicate-send = the LOCKED §S5 residual (KEPT documented;
+hardened to ERROR pageable `briefing_delivery_record_failed` log; full outbox deferred by user choice);
+**MEDIUM** the H2 plain-`with` dropped the typed lock-acquisition error → RESTORED
+`PipelineStartupError` normalization (§L2) + a regression test; **GAP Codex MISSED (I flagged it)** —
+`config.orchestrator.run_monitor_post_briefing` was defined but consumed NOWHERE → `build_daily_chain`
+now honors it (omits Monitor when `False`, §Q5/§Q7/A13) + a composition test.
+**New locked decisions:** §S (next free letter — §O is OWM; §G/§P/§R skipped per the §M convention).
+**S1** namespace; **S2** `train` entrypoint (Data + Research(training) + Modeling(training), one
+run_id, NO Briefing/Monitor, separate from daily cron); **S3** daily `run` entrypoint (5 stages;
+Monitor gated by `run_monitor_post_briefing`); **S4** multi-agent loop semantics (one run_id/lock/
+sweep; skip-no-row-continue gate; `run()`-raise→failed+continue; aggregate status); **S5** §N5
+RESOLVED (`briefing_deliveries`, `UNIQUE(briefing_day_utc, model_version)`, get-before-send /
+best-effort record-after-send; accepted sub-second residual + ERROR pageable log); **S6** bootstrap
+(no active model → Modeling `no_active_model` fatal → Briefing skipped → Monitor partial; expected);
+**S7** composition root + env-secret fail-fast (`validate_environment`) + the `HttpxClient` transport;
+**S8** CLI exit codes (1 iff the aggregate is `failed`; Monitor partial / lock-held never nonzero).
+§N5 row marked RESOLVED-in-§S5.
+**Next:** DEPLOYMENT — the pipeline is FEATURE-COMPLETE. Remaining is out of repo scope: the OS
+scheduler (cron/systemd → `python -m tennis run` at 06:30 UTC + a less-frequent `train`, §S7) and §N1
+Qdrant RAG (`storage/qdrant/`, §E1). The pipeline has NEVER run end-to-end against real data/DB
+(tests mock everything) — the natural next session is a first live `train`→`run` validation + the
+scheduler/runbook. Optional hardening (each its own session): §S5 full outbox, §M3 weather
+interactions, §M11 rank PIT, §M19 odds_drift_to_close, §M18/§Q8 bulk_read_failures, §M21/§Q8
+dtype-drift PSI, §Q8 threshold classification.

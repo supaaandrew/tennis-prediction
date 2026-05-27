@@ -46,6 +46,7 @@ class _FakeRuns:
         self.fail_insert = False
         self.fail_update = False
         self.lock_available = True  # set False to simulate a concurrent run
+        self.fail_lock = False  # set True to simulate a DB failure ACQUIRING the lock
         self.lock_keys: list[int] = []
         # When set, prior_statuses returns this verbatim — lets a precondition-gate
         # test simulate a prior agent's terminal status under the fresh run_id
@@ -117,6 +118,8 @@ class _FakeRuns:
     @contextmanager
     def advisory_lock(self, *, key: int) -> Iterator[bool]:
         self.lock_keys.append(key)
+        if self.fail_lock:  # DB failure while acquiring the lock (in __enter__)
+            raise RuntimeError("lock acquisition failed: connection refused")
         yield self.lock_available
 
 
@@ -141,10 +144,28 @@ class _FakeAgent:
 def _pipeline(
     config: AppConfig, runs: _FakeRuns, agent: _FakeAgent, *, clock: FrozenClock | None = None
 ) -> DailyPipeline:
+    # Single-agent convenience: wrap as a 1-element chain. `run_once()`'s
+    # aggregate over one agent equals that agent's terminal status.
     return DailyPipeline(
         real_clock=clock or FrozenClock(_NOW),
         runs=runs,  # type: ignore[arg-type]
-        agent=agent,  # type: ignore[arg-type]
+        agents=[agent],  # type: ignore[list-item]
+        config=config,
+        db=None,
+    )
+
+
+def _chain(
+    config: AppConfig,
+    runs: _FakeRuns,
+    agents: list[Any],
+    *,
+    clock: FrozenClock | None = None,
+) -> DailyPipeline:
+    return DailyPipeline(
+        real_clock=clock or FrozenClock(_NOW),
+        runs=runs,  # type: ignore[arg-type]
+        agents=agents,  # type: ignore[arg-type]
         config=config,
         db=None,
     )
@@ -152,6 +173,45 @@ def _pipeline(
 
 def _ok_result() -> AgentResult:
     return AgentResult(ok=True, metrics={"sackmann": {"complete": True}}, errors=())
+
+
+class _ChainAgent:
+    """Configurable fake agent for multi-agent chain tests: arbitrary name,
+    declared preconditions, terminal result, and an optional run() exception."""
+
+    def __init__(
+        self,
+        name: str,
+        result: AgentResult | None = None,
+        *,
+        preconditions: tuple[Precondition, ...] = (),
+        raise_exc: Exception | None = None,
+    ) -> None:
+        self.name = name
+        self.lineage = AgentLineage(
+            preconditions=preconditions, heartbeat=HeartbeatPolicy()
+        )
+        self._result = result if result is not None else _ok_result()
+        self._raise = raise_exc
+        self.ctx: AgentContext | None = None
+
+    def run(self, ctx: AgentContext) -> AgentResult:
+        self.ctx = ctx
+        if self._raise is not None:
+            raise self._raise
+        return self._result
+
+
+def _partial_result() -> AgentResult:
+    return AgentResult(
+        ok=False, metrics={}, errors=(AgentError(code="odds_error", message="x"),)
+    )
+
+
+def _failed_result() -> AgentResult:
+    return AgentResult(
+        ok=False, metrics={}, errors=(AgentError(code="staleness_halt", message="stale"),)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +431,28 @@ class TestSingletonLock:
         assert runs.lock_keys == [_DAILY_LOCK_KEY]
         assert agent.ctx is not None
 
+    def test_lock_acquisition_db_failure_normalized_to_startup_error(
+        self, config: AppConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A DB failure while ACQUIRING the lock (in __enter__) is a startup
+        # failure: normalized to PipelineStartupError (§L2), no row, agent never
+        # ran. (Regression for the §S restored typed-error contract.)
+        mock_logger = MagicMock()
+        monkeypatch.setattr("tennis.agents.orchestrator.pipeline._logger", mock_logger)
+        runs = _FakeRuns()
+        runs.fail_lock = True
+        agent = _FakeAgent(_ok_result())
+
+        with pytest.raises(PipelineStartupError):
+            _pipeline(config, runs, agent).run_once()
+
+        assert runs.rows == {}  # no dangling row
+        assert agent.ctx is None  # agent never ran
+        mock_logger.error.assert_any_call(
+            "pipeline_db_unavailable_at_startup",
+            error="RuntimeError('lock acquisition failed: connection refused')",
+        )
+
 
 # ---------------------------------------------------------------------------
 # R6a — precondition gate placed before agent.run() (M-e)
@@ -405,21 +487,27 @@ class TestPreconditionGate:
         assert status == "succeeded"
         assert agent.ctx is not None  # agent ran
 
-    def test_gate_raises_when_data_not_succeeded_agent_never_runs(
+    def test_gate_not_met_skips_downstream_no_row_no_raise(
         self, config: AppConfig
     ) -> None:
-        # Fresh run_id → prior_statuses lacks data=succeeded → the gate raises
-        # BEFORE run(), so the agent never executes.
+        # data runs and is PARTIAL → research's precondition (data succeeded) is
+        # not met → research is SKIPPED in chain mode: it writes NO row, raises
+        # nothing, and the loop simply moves on (§S4).
         runs = _FakeRuns()
-        agent = _GatedAgent(_ok_result())
-        with pytest.raises(PreconditionNotMetError):
-            _pipeline(config, runs, agent).run_once()
-        assert agent.ctx is None  # placed before run(): agent did NOT run
-        # Fix B safety net: the run row is terminally 'failed', NOT left dangling.
-        row = next(iter(runs.rows.values()))
-        assert row.status == "failed"
-        assert row.error is not None
-        assert "PreconditionNotMetError" in row.error["exception"]
+        data = _ChainAgent("data", _partial_result())
+        research = _ChainAgent(
+            "research",
+            preconditions=(
+                Precondition(previous_agent="data", required_status="succeeded"),
+            ),
+        )
+        status = _chain(config, runs, [data, research]).run_once()
+        run_id = data.ctx.run_id  # type: ignore[union-attr]
+        assert research.ctx is None  # skipped — never ran
+        assert runs.get(run_id=run_id, agent="research") is None  # no row
+        assert runs.get(run_id=run_id, agent="data").status == "partial"  # type: ignore[union-attr]
+        # aggregate over the only agent that ran (data) → partial. No raise.
+        assert status == "partial"
 
     def test_gate_passes_when_data_succeeded(self, config: AppConfig) -> None:
         runs = _FakeRuns()
@@ -429,29 +517,25 @@ class TestPreconditionGate:
         assert status == "succeeded"
         assert agent.ctx is not None  # gate passed → agent ran
 
-    def test_agent_exception_writes_failed_and_reraises(self, config: AppConfig) -> None:
-        # Fix B: ANY exception escaping agent.run() (a bug, the §M9 single-shot
-        # rerun IdempotencyError, etc.) terminates the row as 'failed' and stays
-        # loud — it does not strand a 'running' row for the orphan sweep.
-        class _BoomAgent:
-            name = "research"
-
-            def __init__(self) -> None:
-                self.lineage = AgentLineage(preconditions=(), heartbeat=HeartbeatPolicy())
-                self.ctx: AgentContext | None = None
-
-            def run(self, ctx: AgentContext) -> AgentResult:
-                self.ctx = ctx
-                raise RuntimeError("boom mid-run: token=secret")
-
+    def test_agent_exception_records_failed_and_continues_to_monitor(
+        self, config: AppConfig
+    ) -> None:
+        # An exception escaping run() (a bug, the §M9 IdempotencyError, etc.)
+        # terminates THIS agent's row as 'failed' and the loop CONTINUES so the
+        # Monitor still runs (§S4) — it is NOT re-raised.
         runs = _FakeRuns()
-        agent = _BoomAgent()
-        with pytest.raises(RuntimeError, match="boom mid-run"):
-            _pipeline(config, runs, agent).run_once()  # type: ignore[arg-type]
-        assert agent.ctx is not None  # agent DID start (gate is a no-op here)
-        row = next(iter(runs.rows.values()))
-        assert row.status == "failed"
-        assert row.error is not None and "RuntimeError" in row.error["exception"]
+        boom = _ChainAgent("research", raise_exc=RuntimeError("boom mid-run"))
+        monitor = _ChainAgent("monitor")  # empty preconditions → always runs
+        status = _chain(config, runs, [boom, monitor]).run_once()  # must NOT raise
+        run_id = boom.ctx.run_id  # type: ignore[union-attr]
+        boom_row = runs.get(run_id=run_id, agent="research")
+        assert boom_row is not None and boom_row.status == "failed"
+        assert "RuntimeError" in boom_row.error["exception"]  # type: ignore[index]
+        # Monitor STILL ran despite the upstream crash (A13 / §S4).
+        assert monitor.ctx is not None
+        mon_row = runs.get(run_id=run_id, agent="monitor")
+        assert mon_row is not None and mon_row.status == "succeeded"
+        assert status == "failed"  # aggregate: the failed agent dominates
 
     def test_check_preconditions_in_isolation(self) -> None:
         lineage = AgentLineage(
@@ -465,3 +549,111 @@ class TestPreconditionGate:
             lineage.check_preconditions(run_id="r", prior_statuses={})
         with pytest.raises(PreconditionNotMetError):
             lineage.check_preconditions(run_id="r", prior_statuses={"data": "partial"})
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent chain under one run_id (§S4)
+# ---------------------------------------------------------------------------
+class TestMultiAgentChain:
+    def _daily_agents(self) -> list[_ChainAgent]:
+        return [
+            _ChainAgent("data"),
+            _ChainAgent(
+                "research",
+                preconditions=(Precondition("data", "succeeded"),),
+            ),
+            _ChainAgent(
+                "modeling",
+                preconditions=(Precondition("research", "succeeded"),),
+            ),
+            _ChainAgent(
+                "briefing",
+                preconditions=(Precondition("modeling", "succeeded"),),
+            ),
+            _ChainAgent("monitor"),  # empty preconditions → always runs (A13)
+        ]
+
+    def test_full_chain_runs_all_under_one_run_id(self, config: AppConfig) -> None:
+        runs = _FakeRuns()
+        agents = self._daily_agents()
+        status = _chain(config, runs, agents).run_once()
+
+        # All five stages ran and share ONE run_id.
+        run_ids = {a.ctx.run_id for a in agents if a.ctx is not None}
+        assert len(run_ids) == 1
+        run_id = run_ids.pop()
+        for name in ("data", "research", "modeling", "briefing", "monitor"):
+            row = runs.get(run_id=run_id, agent=name)
+            assert row is not None and row.status == "succeeded"
+        # The singleton lock was taken exactly ONCE for the whole chain (§S4).
+        assert runs.lock_keys == [_DAILY_LOCK_KEY]
+        assert status == "succeeded"
+
+    def test_data_failure_skips_middle_but_monitor_runs(self, config: AppConfig) -> None:
+        runs = _FakeRuns()
+        agents = self._daily_agents()
+        agents[0] = _ChainAgent("data", _failed_result())  # data → failed
+        status = _chain(config, runs, agents).run_once()
+
+        run_id = agents[0].ctx.run_id  # type: ignore[union-attr]
+        data_row = runs.get(run_id=run_id, agent="data")
+        assert data_row is not None and data_row.status == "failed"
+        # research / modeling / briefing all skipped: never ran, no rows.
+        for name, agent in zip(
+            ("research", "modeling", "briefing"), agents[1:4], strict=True
+        ):
+            assert agent.ctx is None
+            assert runs.get(run_id=run_id, agent=name) is None
+        # Monitor (empty preconditions) STILL runs despite the upstream failure.
+        assert agents[4].ctx is not None
+        mon_row = runs.get(run_id=run_id, agent="monitor")
+        assert mon_row is not None and mon_row.status == "succeeded"
+        # Aggregate: the failed agent dominates → the run is 'failed'.
+        assert status == "failed"
+
+    def test_bootstrap_no_active_model_sequence(self, config: AppConfig) -> None:
+        """§S6 bootstrap: with no active model, Modeling fails fast
+        (`no_active_model`, fatal) → Briefing is skipped (its `modeling
+        succeeded` precondition is unmet) → Monitor still runs and reports
+        `monitor_no_active_model` (partial, NOT fatal). This is expected, not a
+        bug."""
+        runs = _FakeRuns()
+        no_model = AgentResult(
+            ok=False,
+            metrics={},
+            errors=(AgentError(code="no_active_model", message="none"),),
+        )
+        monitor_partial = AgentResult(
+            ok=False,
+            metrics={},
+            errors=(
+                AgentError(code="monitor_no_active_model", message="no model to score"),
+            ),
+        )
+        agents = [
+            _ChainAgent("data"),
+            _ChainAgent("research", preconditions=(Precondition("data", "succeeded"),)),
+            _ChainAgent(
+                "modeling",
+                no_model,
+                preconditions=(Precondition("research", "succeeded"),),
+            ),
+            _ChainAgent(
+                "briefing", preconditions=(Precondition("modeling", "succeeded"),)
+            ),
+            _ChainAgent("monitor", monitor_partial),
+        ]
+        status = _chain(config, runs, agents).run_once()
+
+        run_id = agents[0].ctx.run_id  # type: ignore[union-attr]
+        modeling_row = runs.get(run_id=run_id, agent="modeling")
+        assert modeling_row is not None and modeling_row.status == "failed"
+        # Briefing skipped: precondition (modeling succeeded) unmet → no row.
+        assert agents[3].ctx is None
+        assert runs.get(run_id=run_id, agent="briefing") is None
+        # Monitor still ran and degraded to partial (no model yet is not fatal).
+        assert agents[4].ctx is not None
+        mon_row = runs.get(run_id=run_id, agent="monitor")
+        assert mon_row is not None and mon_row.status == "partial"
+        # Aggregate is 'failed' (Modeling) — the daily run did not produce a brief.
+        assert status == "failed"

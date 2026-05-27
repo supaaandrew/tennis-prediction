@@ -27,9 +27,12 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from tennis.core.errors import IdempotencyError
+from sqlalchemy.exc import SQLAlchemyError
+
+from tennis.core.errors import IdempotencyError, StorageError
 from tennis.storage.postgres import impl, repositories as proto
 from tennis.storage.postgres.impl import (
+    BriefingDeliveryRepositoryImpl,
     DeadLetterRepositoryImpl,
     EloSnapshotRepositoryImpl,
     FeatureMatrixRepositoryImpl,
@@ -55,6 +58,7 @@ from tennis.storage.postgres.rows import (
     FeatureMatrixRow,
     IngestWatermarkRow,
     OddsSnapshotRow,
+    BriefingDeliveryRow,
     PipelineRunRow,
     PredictionRow,
     WeatherObservationRow,
@@ -112,6 +116,7 @@ class TestProtocolConformance:
             (FeatureMatrixRepositoryImpl, proto.FeatureMatrixRepository),
             (ModelRegistryRepositoryImpl, proto.ModelRegistryRepository),
             (PredictionRepositoryImpl, proto.PredictionRepository),
+            (BriefingDeliveryRepositoryImpl, proto.BriefingDeliveryRepository),
             (PipelineRunRepositoryImpl, proto.PipelineRunRepository),
             (IngestWatermarkRepositoryImpl, proto.IngestWatermarkRepository),
             (DeadLetterRepositoryImpl, proto.DeadLetterRepository),
@@ -184,6 +189,52 @@ class TestDeadLetterNeverRaises:
         result = repo.append(self._row())
         assert result is None
         broken_logger.error.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 2b. BriefingDeliveryRepository — §N5/§S5 idempotency marker
+# ---------------------------------------------------------------------------
+class TestBriefingDeliveryRepository:
+    def _row(self, *, sent_at: datetime | None = None) -> BriefingDeliveryRow:
+        return BriefingDeliveryRow(
+            briefing_day_utc=date(2026, 5, 26),
+            model_version="2016-2019-20260526T0630Z",
+            run_id=uuid4(),
+            sent_at=sent_at or datetime(2026, 5, 26, 6, 30, tzinfo=UTC),
+        )
+
+    def test_record_rejects_naive_sent_at(self) -> None:
+        repo = BriefingDeliveryRepositoryImpl(_make_mock_factory(MagicMock()))
+        with pytest.raises(ValueError, match="sent_at"):
+            repo.record(self._row(sent_at=datetime(2026, 5, 26, 6, 30)))
+
+    def test_record_happy_path_calls_execute(self) -> None:
+        s = MagicMock()
+        repo = BriefingDeliveryRepositoryImpl(_make_mock_factory(s))
+        repo.record(self._row())
+        s.execute.assert_called_once()
+
+    def test_record_wraps_sqlalchemy_error_as_storage_error(self) -> None:
+        s = MagicMock()
+        s.execute.side_effect = SQLAlchemyError("boom")
+        repo = BriefingDeliveryRepositoryImpl(_make_mock_factory(s))
+        with pytest.raises(StorageError):
+            repo.record(self._row())
+
+    def test_get_returns_none_when_absent(self) -> None:
+        s = MagicMock()
+        s.execute.return_value.scalar_one_or_none.return_value = None
+        repo = BriefingDeliveryRepositoryImpl(_make_mock_factory(s))
+        assert (
+            repo.get(briefing_day_utc=date(2026, 5, 26), model_version="v") is None
+        )
+
+    def test_get_wraps_sqlalchemy_error_as_storage_error(self) -> None:
+        s = MagicMock()
+        s.execute.side_effect = SQLAlchemyError("boom")
+        repo = BriefingDeliveryRepositoryImpl(_make_mock_factory(s))
+        with pytest.raises(StorageError):
+            repo.get(briefing_day_utc=date(2026, 5, 26), model_version="v")
 
 
 # ---------------------------------------------------------------------------

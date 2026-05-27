@@ -25,6 +25,7 @@ from tennis.core.errors import BriefingEmailError, BriefingLlmError, StorageErro
 from tennis.core.lineage import Precondition
 from tennis.core.logging import get_logger
 from tennis.storage.postgres.rows import (
+    BriefingDeliveryRow,
     FeatureMatrixRow,
     MatchRow,
     ModelRegistryRow,
@@ -231,6 +232,29 @@ class _FakeEmail:
         self.sent.append((subject, body))
 
 
+class _FakeDelivery:
+    """§N5/§S5 idempotency repo fake. `existing` is the row `get` returns (a
+    prior delivery) or None; `get_raise`/`record_raise` inject failures."""
+
+    def __init__(self, *, existing=None, get_raise=None, record_raise=None):
+        self._existing = existing
+        self._get_raise = get_raise
+        self._record_raise = record_raise
+        self.recorded = []
+        self.get_calls = 0
+
+    def get(self, *, briefing_day_utc, model_version):
+        self.get_calls += 1
+        if self._get_raise is not None:
+            raise self._get_raise
+        return self._existing
+
+    def record(self, row):
+        if self._record_raise is not None:
+            raise self._record_raise
+        self.recorded.append(row)
+
+
 # ---------------------------------------------------------------------------
 # Agent builder + ctx
 # ---------------------------------------------------------------------------
@@ -246,6 +270,7 @@ def _make_agent(
     llm=None,
     email=None,
     dead=None,
+    delivery=None,
     match_repo=None,
     prediction_repo=None,
 ):
@@ -258,6 +283,7 @@ def _make_agent(
         tournament_repo=_FakeTournamentRepo(tourns),
         feature_matrix_repo=_FakeFeatureMatrixRepo(fmrows),
         dead_letter_repo=dead or _FakeDeadLetter(),
+        briefing_delivery_repo=delivery or _FakeDelivery(),
         llm_client=llm or _FakeLlm(),
         email_client=email or _FakeEmail(),
     )
@@ -468,6 +494,113 @@ class TestClientFailures:
         cause = result.errors[0].cause or ""
         assert "SUPERSECRET" not in cause                 # §L10 redaction
         assert "***" in cause
+
+
+# ---------------------------------------------------------------------------
+# §N5 / §S5 — email-delivery idempotency
+# ---------------------------------------------------------------------------
+class TestDeliveryIdempotency:
+    def test_already_delivered_skips_send_and_llm(self, base_config):
+        """A prior delivery row → succeeded, NO send, NO LLM call (the check is
+        before the LLM/render so a re-run is cheap)."""
+        matches, players, tourns = _full_slate([1])
+        email = _FakeEmail()
+        llm = _FakeLlm()
+        existing = BriefingDeliveryRow(
+            briefing_day_utc=date(2026, 5, 26),
+            model_version=_VERSION,
+            run_id=uuid4(),
+            sent_at=_NOW,
+        )
+        delivery = _FakeDelivery(existing=existing)
+        agent = _make_agent(
+            base_config,
+            active=_model_row(),
+            preds=[_qualifying(1)],
+            matches=matches,
+            players=players,
+            tourns=tourns,
+            email=email,
+            llm=llm,
+            delivery=delivery,
+        )
+        result = agent.run(_ctx(base_config))
+        assert result.ok is True
+        assert result.errors == ()
+        assert email.sent == []                       # NOT re-sent
+        assert llm.calls == 0                         # LLM not called on a re-run
+        assert delivery.recorded == []                # nothing newly recorded
+        assert result.metrics["already_delivered"] is True
+        assert result.metrics["email_sent"] is False
+
+    def test_first_send_records_delivery(self, base_config):
+        """No prior row → send once → record one delivery keyed on the
+        decisioning UTC day + active model_version, with the pinned sent_at."""
+        matches, players, tourns = _full_slate([1])
+        email = _FakeEmail()
+        delivery = _FakeDelivery()
+        agent = _make_agent(
+            base_config,
+            active=_model_row(),
+            preds=[_qualifying(1)],
+            matches=matches,
+            players=players,
+            tourns=tourns,
+            fmrows=[_fmrow(1)],
+            email=email,
+            delivery=delivery,
+        )
+        result = agent.run(_ctx(base_config))
+        assert result.ok is True
+        assert len(email.sent) == 1
+        assert len(delivery.recorded) == 1
+        row = delivery.recorded[0]
+        assert row.briefing_day_utc == date(2026, 5, 26)
+        assert row.model_version == _VERSION
+        assert row.sent_at == _NOW
+
+    def test_record_failure_is_best_effort(self, base_config):
+        """A post-send record failure must NOT flip a genuinely-sent briefing to
+        failed — the email went out, so the run stays succeeded (§S5)."""
+        matches, players, tourns = _full_slate([1])
+        email = _FakeEmail()
+        delivery = _FakeDelivery(record_raise=StorageError(_SECRET_DSN))
+        agent = _make_agent(
+            base_config,
+            active=_model_row(),
+            preds=[_qualifying(1)],
+            matches=matches,
+            players=players,
+            tourns=tourns,
+            fmrows=[_fmrow(1)],
+            email=email,
+            delivery=delivery,
+        )
+        result = agent.run(_ctx(base_config))   # must NOT raise
+        assert result.ok is True
+        assert len(email.sent) == 1             # sent exactly once
+
+    def test_get_storage_error_fails_closed_no_send(self, base_config):
+        """A DB error on the pre-send idempotency check fails closed:
+        briefing_db_error, no send (never risk a double-send on an
+        indeterminate DB)."""
+        matches, players, tourns = _full_slate([1])
+        email = _FakeEmail()
+        delivery = _FakeDelivery(get_raise=StorageError(_SECRET_DSN))
+        agent = _make_agent(
+            base_config,
+            active=_model_row(),
+            preds=[_qualifying(1)],
+            matches=matches,
+            players=players,
+            tourns=tourns,
+            email=email,
+            delivery=delivery,
+        )
+        result = agent.run(_ctx(base_config))
+        assert result.ok is False
+        assert {e.code for e in result.errors} == {"briefing_db_error"}
+        assert email.sent == []
 
 
 # ---------------------------------------------------------------------------

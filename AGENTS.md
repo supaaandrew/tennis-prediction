@@ -29,10 +29,13 @@ DataAgent ──▶ ResearchAgent ──▶ ModelingAgent ──▶ BriefingAgen
 - `monitor` is the only stage that runs regardless of upstream status
   (`config.orchestrator.run_monitor_post_briefing: true`).
 
-**Build status:** `data` is built (`agents/data/agent.py`) and its lifecycle
-owner `DailyPipeline` (`agents/orchestrator/pipeline.py`) is built. `research`,
-`modeling`, `briefing`, `monitor` are not yet built — the contracts below are
-the targets they must satisfy.
+**Build status:** ALL five stages are built (`agents/{data,research,modeling,
+briefing,monitor}/`) and the orchestrator-wiring session (§S) shipped the
+multi-agent sequential loop in `DailyPipeline` (`agents/orchestrator/pipeline.py`
+now takes `agents: Sequence[Agent]` and runs the chain under one `run_id`), the
+DI composition root (`composition.py` + `adapters/http_client.py`), and the
+`python -m tennis train` / `run` CLI (`cli.py`). Only the OS scheduler
+(cron/systemd) remains as deployment config (§S7).
 
 ---
 
@@ -153,22 +156,15 @@ agent.lineage.check_preconditions(
   Wrap with `str(run_id)` for the former, pass the raw `UUID` to the latter.
   `prior_statuses` returns `{agent_name: latest_terminal_status}` for the run.
 
-**Current state of the downstream gate (`agents/orchestrator/pipeline.py`):**
-it is **commented-out code**, not a no-op function — `_run_locked()` invokes
-exactly one injected agent (`self._agent`) and the gate lives only as a comment
-at **`pipeline.py:129-134`** (the `check_preconditions` call is on lines
-131-133, immediately before `return status`). The pipeline docstring (lines
-14-16) calls it a "no-op stub"; in practice there is nothing to replace — the
-seam is uncommented and placed when downstream agents arrive. The gate
-activates as each agent is added (ResearchAgent is the first to carry a
-non-empty `preconditions` tuple).
-
-> **Caveat for the wiring layer:** `DailyPipeline` today holds a single
-> `agent` and mints a fresh `run_id` per `run_once()`. A second agent's
-> precondition ("data succeeded for *this* run_id") is only satisfiable once
-> all stages run under one shared `run_id` in a sequential loop — that loop is
-> part of the deferred DI/cron wiring (§9 of `DECISIONS.md`), not the
-> single-agent `run_once()` as built.
+**Current state of the downstream gate (`agents/orchestrator/pipeline.py`, §S4):**
+`DailyPipeline` now runs an ordered `agents: Sequence[Agent]` chain under ONE
+`run_id`, so the gate is LIVE. Per agent, `_run_agent` calls
+`check_preconditions(run_id, prior_statuses(run_id))` against the statuses the
+prior agents wrote for THIS run; a not-met precondition **skips** that agent (no
+`pipeline_runs` row — there is no `"skipped"` status — a structured warning, and
+the loop continues), so downstream gated agents skip too while empty-precondition
+agents (Data, Monitor A13) always run. An unexpected exception escaping `run()` is
+recorded as that agent's `failed` row and the loop CONTINUES (Monitor still runs).
 
 ---
 
@@ -237,9 +233,10 @@ be computable strictly from rows whose terminal timestamp is `< as_of_ts`.
   Open early matches land at ~T-30h (C12). Accepted.
 - **Heartbeat between steps only** — a long single step can exceed
   `orphan_after_s` (§L7); safe under the §L9 singleton lock.
-- **DI adapter-factory wiring + cron shim are deferred** — `run_once()` exists;
-  the multi-agent sequential loop (shared `run_id`) and scheduler do not (§5 of
-  `DECISIONS.md`).
+- **OS scheduler is deployment config (§S7)** — the multi-agent sequential loop
+  (shared `run_id`), the DI composition root, and the `train`/`run` CLI are built
+  (§S); only the cron/systemd timer that invokes `python -m tennis run` at 06:30
+  UTC is environment-specific and lives outside the repo.
 - **Qdrant RAG deferred** (E1) — SQL `ORDER BY` similarity suffices for v1
   briefings.
 - **No A/B / shadow model serving** (E4) — `model_registry.is_active` ≤ 1.

@@ -302,6 +302,23 @@ class PredictionRow:
     created_at: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class BriefingDeliveryRow:
+    """Email-delivery idempotency marker (migration 013, §N5/§S5).
+
+    `UNIQUE(briefing_day_utc, model_version)` is the idempotency key; a row
+    exists iff the day's briefing for that model was delivered. `run_id` is
+    audit-only. `sent_at` is the confirmed-send instant (tz-aware UTC).
+    """
+
+    briefing_day_utc: date
+    model_version: str
+    run_id: UUID
+    sent_at: datetime
+    id: int | None = None  # BIGSERIAL
+    created_at: datetime | None = None
+
+
 # ---------------------------------------------------------------------------
 # Migration 006 / 009 — runs + watermarks + dead_letter
 # ---------------------------------------------------------------------------

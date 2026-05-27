@@ -42,6 +42,7 @@ from tennis.core.errors import IdempotencyError, StorageError
 from tennis.core.logging import get_logger
 from tennis.storage.postgres import models as m
 from tennis.storage.postgres.rows import (
+    BriefingDeliveryRow,
     DeadLetterRow,
     DevigMethod,
     EloSnapshotRow,
@@ -1159,6 +1160,44 @@ class PredictionRepositoryImpl:
                 .order_by(m.Prediction.predicted_at.asc())
             ).scalars().all()
             return [_orm_to_row(o, PredictionRow) for o in rows]
+
+
+class BriefingDeliveryRepositoryImpl:
+    """Email-delivery idempotency (migration 013, §N5/§S5)."""
+
+    def __init__(self, session_factory: SessionCallable) -> None:
+        self._sf = session_factory
+
+    def get(
+        self, *, briefing_day_utc: date, model_version: str
+    ) -> BriefingDeliveryRow | None:
+        try:
+            with self._sf() as s:
+                o = s.execute(
+                    select(m.BriefingDelivery).where(
+                        m.BriefingDelivery.briefing_day_utc == briefing_day_utc,
+                        m.BriefingDelivery.model_version == model_version,
+                    )
+                ).scalar_one_or_none()
+                return _orm_to_row(o, BriefingDeliveryRow) if o else None
+        except SQLAlchemyError as exc:
+            raise StorageError("BriefingDelivery.get query failed") from exc
+
+    def record(self, row: BriefingDeliveryRow) -> None:
+        """Insert the delivery marker; a duplicate `(briefing_day_utc,
+        model_version)` is a no-op (idempotent re-run). A DB/IO failure raises
+        a TYPED `StorageError` so the agent can isolate it (§S5: best-effort)."""
+        _require_tz_aware(row.sent_at, "sent_at")
+        values = _row_to_dict(row, drop_none_for=("id", "created_at"))
+        try:
+            with self._sf() as s:
+                stmt = pg_insert(m.BriefingDelivery).values(**values)
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=["briefing_day_utc", "model_version"]
+                )
+                s.execute(stmt)
+        except SQLAlchemyError as exc:
+            raise StorageError("BriefingDelivery.record insert failed") from exc
 
 
 # ===========================================================================

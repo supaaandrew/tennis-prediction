@@ -85,7 +85,12 @@
       "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit -q --no-header)",
       "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit/models -q --no-header)",
       "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit/models/test_splits.py -q --no-header)",
-      "Skill(codex:adversarial-review)"
+      "Skill(codex:adversarial-review)",
+      "Bash(PYTHONPATH=src /c/Users/Andrew/Documents/Tennis_Prediction_Bot/.venv/Scripts/python.exe -m pytest tests/unit/agents/orchestrator/test_pipeline.py -q)",
+      "Bash(PYTHONPATH=src /c/Users/Andrew/Documents/Tennis_Prediction_Bot/.venv/Scripts/python.exe -m pytest tests/unit -q)",
+      "Bash(/c/Users/Andrew/Documents/Tennis_Prediction_Bot/.venv/Scripts/python.exe -m ruff check src/tennis/agents/orchestrator/pipeline.py)",
+      "Bash(PYTHONPATH=src /c/Users/Andrew/Documents/Tennis_Prediction_Bot/.venv/Scripts/python.exe -m pytest tests/unit/test_composition.py tests/unit/agents/orchestrator/test_pipeline.py tests/unit/agents/briefing/test_agent.py -q)",
+      "Bash(/c/Users/Andrew/Documents/Tennis_Prediction_Bot/.venv/Scripts/python.exe -m ruff check src/tennis/composition.py src/tennis/agents/orchestrator/pipeline.py src/tennis/agents/briefing/agent.py)"
     ]
   }
 }

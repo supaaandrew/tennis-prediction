@@ -1,23 +1,34 @@
-"""DailyPipeline — owns the `pipeline_runs` lifecycle for the daily ingest (P7).
+"""DailyPipeline — owns the `pipeline_runs` lifecycle for one daily/training run.
 
-orphan-sweep -> insert a `running` row -> build a per-run `AgentContext` (pinned
-clock + heartbeat closure) -> invoke the agent -> map the result to a terminal
-status -> `update_status`. The DataAgent does the ingest; this class does the
-bookkeeping and is the seam the other three agents will plug into later.
+Runs an ordered chain of agents under ONE `run_id` and ONE cluster-wide singleton
+advisory lock (§S4). Per agent: precondition gate -> insert a `running` row ->
+build a per-agent `AgentContext` (pinned clock + heartbeat closure) -> invoke the
+agent -> map the result to a terminal status -> `update_status`. One orphan sweep
+runs once, before the first agent.
+
+Chain semantics (§S4):
+  - Precondition gate: an agent whose precondition is not met for THIS run_id is
+    SKIPPED — it writes no `pipeline_runs` row (there is no "skipped" status) and
+    the loop continues. Its downstream gated agents then skip naturally; an agent
+    with empty preconditions (DataAgent, MonitorAgent) always runs (Monitor A13).
+  - An UNEXPECTED exception escaping `agent.run()` is recorded as that agent's
+    terminal `failed` status and the loop CONTINUES (so Monitor still runs) — it
+    is not re-raised. (Agents return an `AgentResult` for documented failures; an
+    escape is a bug.)
+  - `run_once()` returns the aggregate terminal status over the agents that RAN
+    (`failed` if any ran-agent failed, else `partial` if any was partial, else
+    `succeeded`), or `None` when another run already holds the lock.
 
 Clock split (§L4): this class holds the REAL clock for run-lifecycle timestamps
-(started_at, heartbeats, finished_at, orphan-sweep `now`). The agent and every
+(started_at, heartbeats, finished_at, orphan-sweep `now`). Each agent and every
 adapter see a clock PINNED to `as_of` via `AgentContext.clock`. A frozen heartbeat
 timestamp would make a live run look instantly orphaned, so the two clocks must
 never be confused — the real clock never enters `AgentContext`.
-
-v1 scope: `run_once()` invokes the DataAgent only. The downstream precondition
-chain (Research -> Modeling -> Briefing) is future work; the gate is a no-op stub.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 from uuid import UUID, uuid4
@@ -25,7 +36,7 @@ from uuid import UUID, uuid4
 from tennis.core.clock import Clock, FrozenClock
 from tennis.core.config import AppConfig
 from tennis.core.contracts import Agent, AgentContext, AgentError, AgentResult
-from tennis.core.errors import PipelineStartupError
+from tennis.core.errors import PipelineStartupError, PreconditionNotMetError
 from tennis.core.lineage import RunStatus
 from tennis.core.logging import get_logger, redact_text
 from tennis.storage.postgres.repositories import PipelineRunRepository
@@ -74,30 +85,31 @@ _DAILY_LOCK_KEY = 0x7A6E_6E69_5F64  # "tn_d" mnemonic; fits signed bigint
 
 
 class DailyPipeline:
-    """Run-row lifecycle owner for the daily DataAgent run."""
+    """Run-row lifecycle owner for an ordered agent chain under one run_id."""
 
     def __init__(
         self,
         *,
         real_clock: Clock,
         runs: PipelineRunRepository,
-        agent: Agent,
+        agents: Sequence[Agent],
         config: AppConfig,
         db: Any,
     ) -> None:
         self._real_clock = real_clock
         self._runs = runs
-        self._agent = agent
+        self._agents = tuple(agents)
         self._config = config
         self._db = db
 
     def run_once(self) -> RunStatus | None:
-        """Run the daily pipeline once under a cluster-wide singleton lock.
+        """Run the chain once under a cluster-wide singleton lock.
 
-        Returns the terminal `RunStatus`, or `None` when another run already
-        holds the lock — in that case this invocation is a clean no-op (no row
-        inserted, no orphan sweep), so an overlapping cron retry / manual
-        trigger / >24h overrun cannot reap the live run's `running` row (§L7).
+        Returns the aggregate terminal `RunStatus` over the agents that ran, or
+        `None` when another run already holds the lock — in that case this
+        invocation is a clean no-op (no row inserted, no orphan sweep), so an
+        overlapping cron retry / manual trigger / >24h overrun cannot reap the
+        live run's `running` row (§L7).
         """
         with self._singleton_lock() as acquired:
             if not acquired:
@@ -107,27 +119,73 @@ class DailyPipeline:
 
     def _run_locked(self) -> RunStatus:
         run_id = uuid4()
-        as_of = self._real_clock.now()
-
-        # DB-startup guard (§L2): orphans()/insert() are the first DB writes.
-        # If the DB is unavailable here, no row can be written — there is no
-        # status to update, so the failure surfaces out-of-band.
-        try:
-            self._sweep_orphans()
-            self._runs.insert(
-                PipelineRunRow(
-                    run_id=run_id,
-                    pipeline=_PIPELINE,
-                    agent=self._agent.name,
-                    started_at=as_of,
-                    status="running",
-                    attempt=_ATTEMPT,
-                    heartbeat_interval_s=self._config.orchestrator.heartbeat.interval_s,
-                )
+        as_of = self._real_clock.now()  # one pinned instant for the whole chain
+        statuses: list[RunStatus] = []
+        for i, agent in enumerate(self._agents):
+            status = self._run_agent(
+                agent, run_id=run_id, as_of=as_of, is_first=(i == 0)
             )
-        except Exception as exc:
-            _logger.error("pipeline_db_unavailable_at_startup", error=redact_text(repr(exc)))
-            raise PipelineStartupError("database unavailable at pipeline startup") from exc
+            if status is not None:  # None == skipped (precondition not met)
+                statuses.append(status)
+        aggregate = self._aggregate(statuses)
+        _logger.info("pipeline_run_complete", run_id=str(run_id), status=aggregate)
+        return aggregate
+
+    def _run_agent(
+        self, agent: Agent, *, run_id: UUID, as_of: Any, is_first: bool
+    ) -> RunStatus | None:
+        """Run one agent under the shared run_id. Returns its terminal status,
+        or `None` if it was skipped because a precondition was not met (§S4)."""
+        # Precondition gate (§S4): only read prior_statuses when the agent
+        # actually declares preconditions — so the first agent (DataAgent, empty
+        # preconditions) never issues a read before the §L2 startup guard.
+        if agent.lineage.preconditions:
+            try:
+                agent.lineage.check_preconditions(
+                    run_id=str(run_id),
+                    prior_statuses=self._runs.prior_statuses(run_id=run_id),
+                )
+            except PreconditionNotMetError as exc:
+                # Skip-and-continue: no pipeline_runs row (there is no "skipped"
+                # status), a structured warning, and the loop moves on. Monitor
+                # has empty preconditions, so it is never skipped here (A13).
+                _logger.warning(
+                    "pipeline_agent_skipped",
+                    agent=agent.name,
+                    cause=redact_text(str(exc)),
+                )
+                return None
+
+        # §L2 startup guard: for the FIRST agent, the orphan sweep + its running
+        # row are the first DB writes. If the DB is unavailable here, no row can
+        # be written — there is no status to update, so it surfaces out-of-band.
+        running_row = PipelineRunRow(
+            run_id=run_id,
+            # §L4: started_at is a run-lifecycle timestamp → the REAL clock at the
+            # moment THIS agent's row is inserted, not the run's pinned `as_of`
+            # (which the agent/adapters see). For a later stage this is hours
+            # after `as_of`; using the real instant keeps the orphan-sweep
+            # `COALESCE(last_heartbeat_at, started_at)` fallback honest per agent.
+            pipeline=_PIPELINE,
+            agent=agent.name,
+            started_at=self._real_clock.now(),
+            status="running",
+            attempt=_ATTEMPT,
+            heartbeat_interval_s=self._config.orchestrator.heartbeat.interval_s,
+        )
+        if is_first:
+            try:
+                self._sweep_orphans()
+                self._runs.insert(running_row)
+            except Exception as exc:
+                _logger.error(
+                    "pipeline_db_unavailable_at_startup", error=redact_text(repr(exc))
+                )
+                raise PipelineStartupError(
+                    "database unavailable at pipeline startup"
+                ) from exc
+        else:
+            self._runs.insert(running_row)
 
         ctx = AgentContext(
             run_id=run_id,
@@ -136,43 +194,29 @@ class DailyPipeline:
             db=self._db,
             clock=FrozenClock(as_of),  # pinned — every adapter's now() == as_of
             logger=_logger,
-            heartbeat=self._make_heartbeat(run_id),
+            heartbeat=self._make_heartbeat(run_id, agent.name),
         )
         ctx.heartbeat()  # initial beat right after the row exists
-        # Precondition gate (M-e): a downstream agent (e.g. ResearchAgent) may
-        # only start once its declared prior agent reached the required status
-        # for THIS run_id. No-op for DataAgent (empty preconditions); raises
-        # PreconditionNotMetError otherwise. Placed BEFORE run() so a missing
-        # precondition prevents the agent from doing any work. (Until the
-        # deferred shared-run_id multi-agent loop exists, a brand-new run's
-        # prior_statuses is empty, so a gated agent always fails end-to-end here
-        # — exercised in isolation by tests; see §R6 shared-run_id caveat.)
         try:
-            self._agent.lineage.check_preconditions(
-                run_id=str(run_id),
-                prior_statuses=self._runs.prior_statuses(run_id=run_id),
-            )
-            result = self._agent.run(ctx)
+            result = agent.run(ctx)
         except Exception as exc:
-            # Any failure that escapes the gate or the agent as an EXCEPTION — a
-            # not-met precondition, an agent contract breach, the §M9 single-shot-
-            # rerun IdempotencyError — must still TERMINATE the run row, never
-            # leave it dangling for the orphan sweep while the DB is reachable.
-            # Write a 'failed' terminal status (redacted, §L10) then re-raise so
-            # the failure stays loud (PreconditionNotMetError is "never silent").
-            # NB: only the gate+run() are wrapped — the terminal write below keeps
-            # its §L8 propagate-on-failure behavior (a dangling row there is the
-            # one case the orphan sweep is meant to reap).
-            _logger.error("pipeline_agent_raised", error=redact_text(repr(exc)))
+            # An UNEXPECTED exception escaping run() (a bug, the §M9 single-shot-
+            # rerun IdempotencyError, etc.) terminates THIS agent's row as
+            # 'failed' (redacted, §L10) and the loop CONTINUES so Monitor still
+            # runs (§S4). The terminal write keeps its §L8 propagate-on-failure
+            # behavior — a failure there is the one case the orphan sweep reaps.
+            _logger.error(
+                "pipeline_agent_raised", agent=agent.name, error=redact_text(repr(exc))
+            )
             self._runs.update_status(
                 run_id=run_id,
-                agent=self._agent.name,
+                agent=agent.name,
                 attempt=_ATTEMPT,
                 status="failed",
                 finished_at=self._real_clock.now(),
                 error={"exception": f"{type(exc).__name__}: {redact_text(str(exc))}"},
             )
-            raise
+            return "failed"
 
         status = self._map_status(result)
         # §L8: a failure on this terminal write PROPAGATES — we never swallow it
@@ -180,24 +224,42 @@ class DailyPipeline:
         # run's orphan sweep.
         self._runs.update_status(
             run_id=run_id,
-            agent=self._agent.name,
+            agent=agent.name,
             attempt=_ATTEMPT,
             status=status,
             finished_at=self._real_clock.now(),
             metrics=dict(result.metrics),
             error=self._serialize_errors(result.errors),
         )
-        _logger.info("pipeline_run_complete", run_id=str(run_id), status=status)
         return status
+
+    @staticmethod
+    def _aggregate(statuses: Sequence[RunStatus]) -> RunStatus:
+        """Aggregate the chain's per-agent terminal statuses (§S4/§S8): `failed`
+        if any ran-agent failed, else `partial` if any was partial, else
+        `succeeded`. An empty set (no agent ran — degenerate, all gated) is
+        treated as `failed`."""
+        if not statuses:
+            return "failed"
+        if "failed" in statuses:
+            return "failed"
+        if "partial" in statuses:
+            return "partial"
+        return "succeeded"
 
     # -- internals ----------------------------------------------------------
     @contextmanager
     def _singleton_lock(self) -> Iterator[bool]:
         """Hold the cluster-wide singleton advisory lock for the whole run so
         two overlapping invocations cannot run concurrently (and thus cannot
-        orphan-sweep each other's live rows). A DB failure while acquiring the
-        lock is a startup failure — no row exists yet, so it surfaces out-of-
-        band as `PipelineStartupError`."""
+        orphan-sweep each other's live rows).
+
+        A DB failure while ACQUIRING the lock is a startup failure — no row
+        exists yet — so it is normalized to `PipelineStartupError` (§L2), the one
+        typed contract for startup DB faults at the CLI/orchestrator boundary.
+        Only the acquisition (`__enter__`) is wrapped; the run body's own
+        exceptions propagate untouched (they own their per-agent terminal write).
+        """
         cm = self._runs.advisory_lock(key=_DAILY_LOCK_KEY)
         try:
             acquired = cm.__enter__()
@@ -213,16 +275,17 @@ class DailyPipeline:
         finally:
             cm.__exit__(None, None, None)
 
-    def _make_heartbeat(self, run_id: UUID) -> Callable[[], None]:
-        """Build the per-run emitter. Closes over the REAL clock so beats reflect
-        wall time even though the agent only sees the pinned clock. Best-effort:
-        a heartbeat hiccup must never abort a long ingest."""
+    def _make_heartbeat(self, run_id: UUID, agent_name: str) -> Callable[[], None]:
+        """Build the per-agent emitter. Closes over the REAL clock so beats
+        reflect wall time even though the agent only sees the pinned clock, and
+        over the agent name so each stage beats its own row. Best-effort: a
+        heartbeat hiccup must never abort a long ingest."""
 
         def _emit() -> None:
             try:
                 self._runs.heartbeat(
                     run_id=run_id,
-                    agent=self._agent.name,
+                    agent=agent_name,
                     attempt=_ATTEMPT,
                     now=self._real_clock.now(),
                 )
