@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from tennis.models.metrics import expected_calibration_error, roi_kelly_backtest
+from tennis.models.metrics import (
+    expected_calibration_error,
+    population_stability_index,
+    roi_kelly_backtest,
+)
 
 
 class TestECE:
@@ -23,6 +27,37 @@ class TestECE:
 
     def test_empty_is_nan(self):
         assert np.isnan(expected_calibration_error(np.asarray([]), np.asarray([])))
+
+
+class TestPSI:
+    def test_identical_distributions_near_zero(self):
+        rng = np.random.default_rng(0)
+        sample = rng.uniform(0.0, 1.0, size=5000)
+        # Same distribution (independent draws) → PSI ≈ 0.
+        other = rng.uniform(0.0, 1.0, size=5000)
+        assert population_stability_index(sample, other) < 0.05
+
+    def test_shifted_distribution_high_psi(self):
+        # Reference concentrated low, actual concentrated high → large PSI.
+        rng = np.random.default_rng(1)
+        expected = rng.uniform(0.0, 0.3, size=2000)
+        actual = rng.uniform(0.7, 1.0, size=2000)
+        assert population_stability_index(actual, expected) > 0.2
+
+    def test_empty_actual_is_nan(self):
+        assert np.isnan(population_stability_index(np.asarray([]), np.asarray([0.5])))
+
+    def test_empty_expected_is_nan(self):
+        # First-ever run: the reference window has no rows → NaN (Monitor → None).
+        assert np.isnan(population_stability_index(np.asarray([0.5]), np.asarray([])))
+
+    def test_empty_bin_does_not_blow_up(self):
+        # An empty bin on one side must contribute a FINITE term (epsilon floor),
+        # never ±inf/NaN.
+        psi = population_stability_index(
+            np.asarray([0.05, 0.05, 0.05]), np.asarray([0.95, 0.95, 0.95])
+        )
+        assert np.isfinite(psi)
 
 
 class TestRoiKelly:

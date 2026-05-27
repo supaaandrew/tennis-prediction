@@ -108,6 +108,16 @@ class MatchRepository(Protocol):
     """
 
     def get(self, match_id: int) -> MatchRow | None: ...
+    def list_for_ids(
+        self, *, match_ids: Sequence[int]
+    ) -> Mapping[int, MatchRow]:
+        """All matches among `match_ids`, keyed by `match_id` — the bulk dual of
+        `get` (§Q). Empty `match_ids` → `{}` with NO DB round-trip. Lets the
+        Monitor join a whole prediction window to realized outcomes in ONE read
+        instead of one `get` per row (retires the per-row N+1; §M18 precedent).
+        A DB/IO failure raises a typed `StorageError`."""
+        ...
+
     def get_by_source(self, *, source: str, source_uid: str) -> MatchRow | None: ...
     def upsert(self, row: MatchRow) -> MatchRow:
         """Insert or merge a match, reconciling on the `match_id` PRIMARY KEY

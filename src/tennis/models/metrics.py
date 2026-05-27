@@ -15,6 +15,38 @@ import numpy as np
 from tennis.core.config import AppConfig
 
 _DEFAULT_BINS = 10
+_PSI_EPSILON = 1e-6  # smooths empty bins so a 0-count never divides/logs to ±inf
+
+
+def population_stability_index(
+    actual: np.ndarray,
+    expected: np.ndarray,
+    *,
+    n_bins: int = _DEFAULT_BINS,
+    epsilon: float = _PSI_EPSILON,
+) -> float:
+    """PSI of an `actual` probability sample vs an `expected` (reference) sample.
+
+    Equal-width [0, 1] bins (the same grid as `expected_calibration_error`):
+    `PSI = Σ_bin (a_frac − e_frac)·ln(a_frac / e_frac)`, where each fraction is
+    epsilon-floored so an empty bin contributes a finite term instead of ±inf.
+    Both inputs are probabilities in [0, 1] (the model's `p1_prob_cal`).
+
+    NaN when either sample is empty — there is no distribution to compare, which
+    the Monitor maps to a `None` window metric (a reference-less first run, §Q)."""
+    actual = np.asarray(actual, dtype="float64")
+    expected = np.asarray(expected, dtype="float64")
+    if actual.size == 0 or expected.size == 0:
+        return float("nan")
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    # digitize against interior edges → bin index in [0, n_bins-1] (mirrors ECE).
+    a_idx = np.clip(np.digitize(actual, edges[1:-1]), 0, n_bins - 1)
+    e_idx = np.clip(np.digitize(expected, edges[1:-1]), 0, n_bins - 1)
+    a_counts = np.bincount(a_idx, minlength=n_bins).astype("float64")
+    e_counts = np.bincount(e_idx, minlength=n_bins).astype("float64")
+    a_frac = np.clip(a_counts / actual.size, epsilon, None)
+    e_frac = np.clip(e_counts / expected.size, epsilon, None)
+    return float(np.sum((a_frac - e_frac) * np.log(a_frac / e_frac)))
 
 
 def expected_calibration_error(

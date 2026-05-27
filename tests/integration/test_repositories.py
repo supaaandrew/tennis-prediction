@@ -952,3 +952,57 @@ class TestMatchStatListForPlayer:
         p = _seed_player(players, source_uid="sbEmpty")
         stats = MatchStatRepositoryImpl(session_factory)
         assert stats.list_for_player(player_id=p.player_id, match_ids=[]) == {}
+
+
+# ---------------------------------------------------------------------------
+# MatchRepository.list_for_ids() — the §Q bulk outcome-join read (retires the
+# Monitor's per-prediction get() N+1)
+# ---------------------------------------------------------------------------
+class TestMatchListForIds:
+    def test_bulk_read_keys_by_match_and_skips_absent(
+        self, session_factory: Any
+    ) -> None:
+        from tennis.storage.postgres.impl import (
+            MatchRepositoryImpl,
+            PlayerRepositoryImpl,
+            TournamentRepositoryImpl,
+            VenueRepositoryImpl,
+        )
+
+        players = PlayerRepositoryImpl(session_factory)
+        venues = VenueRepositoryImpl(session_factory)
+        tournaments = TournamentRepositoryImpl(session_factory)
+        matches = MatchRepositoryImpl(session_factory)
+
+        v = _seed_venue(venues, city="MatchBulkCity", country="MBK")
+        t = _seed_tournament(tournaments, slug="match-bulk", venue_id=v.venue_id)
+        p1 = _seed_player(players, source_uid="mbA")
+        p2 = _seed_player(players, source_uid="mbB")
+
+        ids = []
+        for i, rnd in enumerate(["R32", "R16"]):
+            mr = _seed_match(
+                matches, tournament_id=t.tournament_id,
+                p1_id=p1.player_id, p2_id=p2.player_id,
+                round=rnd, match_date=date(2026, 4, 1 + i),
+                status="final", source_uid=f"mb-{rnd}",
+            )
+            ids.append(mr.match_id)
+        m1, m2 = ids
+        absent = 99_999_999  # never inserted
+
+        result = matches.list_for_ids(match_ids=[m1, m2, absent])
+
+        # Keyed by match_id; the absent id is silently skipped (no row).
+        assert set(result) == {m1, m2}
+        assert result[m1].match_id == m1
+        assert result[m2].p1_id == p1.player_id
+
+    def test_empty_match_ids_returns_empty_no_query(
+        self, session_factory: Any
+    ) -> None:
+        from tennis.storage.postgres.impl import MatchRepositoryImpl
+
+        # Empty fast-path (contract): returns {} without touching the DB.
+        matches = MatchRepositoryImpl(session_factory)
+        assert matches.list_for_ids(match_ids=[]) == {}

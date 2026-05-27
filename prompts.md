@@ -1078,3 +1078,56 @@ upstream status; ECE/PSI/ROI into `pipeline_runs.metrics`) and/or **Orchestrator
 adapter-factory + cron → `DailyPipeline.run_once()`; the sequential multi-agent loop under one
 `run_id` that fires the §L12 precondition chain end-to-end). NB training is a separate prerequisite
 job; the daily pipeline runs ModelingAgent in prediction mode.
+
+## Session 2026-05-27 — Monitor Agent (§Q): post-pipeline ECE/PSI/ROI observability
+**Prompt:** Build the Monitor Agent ONLY (`agents/monitor/`, AGENTS.md A13) — post-briefing
+observability that computes ECE/PSI/ROI over `config.monitor.windows_days` into
+`pipeline_runs.metrics`, running regardless of upstream status (`preconditions=()`). First resolve
+ten setup items (next free decision letter, ROI basis, zero-settled behaviour, scope split, the
+A13 `preconditions==()` test, Monitor-vs-4-agent-chain framing, PSI reference, ECE bins, metrics
+JSON schema, defer §M18/§M21) + three pre-build confirmations (auto metrics persistence, PSI
+no-prior-window, CLAUDE.md ⬜ line). Lock as §Q. Orchestrator wiring explicitly OUT of scope.
+**Shipped:** New `agents/monitor/{__init__,agent}.py` (`MonitorAgent(Agent)`, `name="monitor"`,
+**`preconditions=()`** — the `run_monitor_post_briefing` gate lives in the orchestrator, not
+`run()`): resolve active model → per window in `config.monitor.windows_days` read predictions
+(`list_for_window`, active-`model_version` scoped) → realized-outcome join → ECE/PSI/ROI → §Q6
+JSON envelope returned in `AgentResult.metrics` (the orchestrator persists it via
+`update_status(metrics=…)` at pipeline.py — NO direct run-row write, repo deps are
+Prediction/Match/ModelRegistry only). New `models.metrics.population_stability_index` (equal-width
+[0,1] bins mirroring ECE, epsilon-floored fractions, NaN on empty). New `MatchRepository.list_for_ids`
+(Protocol + `MatchRepositoryImpl` + empty-`{}` fast-path, single IN-list, typed `StorageError`) —
+the §M18 bulk dual, ONE read per window. `pipeline._FATAL_CODES` += `monitor_db_error` (only fatal
+Monitor code; `monitor_partial` / `monitor_no_active_model` → `partial`). Reused (no re-derive):
+`expected_calibration_error` (10 bins), `roi_kelly_backtest` (`implied_p1=p1_implied_decision`),
+the B1/Modeling agent shape, `redact_text`/§N3 window pattern. Tests **1153 → 1177 (+24 unit; +2
+Docker-gated integration for `list_for_ids`)**, full unit suite green (~14s incl. ML tests).
+**Codex findings:** auto-review (RUN REVIEW) 0 CRITICAL / 1 HIGH — **H1 (fixed)** the `_window_bounds`
+anchor was start-of-day midnight, excluding the run-day's ~06:30 predictions from the current
+window → anchored on NEXT midnight UTC (mirrors B1 `_slate_window`) + a run-day-inclusion regression
+test. Adversarial /codex:adversarial-review 0 CRITICAL / 2 HIGH / 1 MEDIUM, all triaged VALID +
+fixed: **HIGH F1** — `monitor_db_error` returned a non-§Q6 payload (`{"stage":"io"}`) → return the
+§Q6 envelope on EVERY terminal state (model_version null, windows {}) + test; **HIGH F2** —
+per-prediction `match_repo.get()` N+1 over multi-thousand-row windows → bulk `list_for_ids` (one
+read/window) + perf-guard unit test + integration test; **MEDIUM F3** — UTC not enforced (only
+naive rejected) so a non-UTC `as_of.date()` could shift the anchor a day → normalize
+`as_of.astimezone(UTC)` before window math + non-UTC regression test. Also added the
+winner∉{p1,p2} corruption test (handling existed, was untested). Lint: removed an unused `Sequence`
+import + lowercased a test name (N802); `TC001`/`RUF002` left consistent with the shipped briefing
+agent baseline.
+**New locked decisions:** §Q (next free letter — §P/§R skipped per the §M convention). **Q1**
+realized-outcome join (label `winner_id==p1_id` on `status='final'`; not-final/no-winner/corrupt →
+pending, excluded-but-counted) + **Q2** live ROI basis = `p1_implied_decision` via `roi_kelly_backtest`
+(documented no-vig optimism) + **Q3** ECE reuse at 10 bins + **Q4** PSI = new `population_stability_index`,
+subject = `p1_prob_cal` (settlement-independent), reference = immediately-preceding equal-width
+non-overlapping window (next-midnight anchor) + **Q5** status semantics (succeeded/partial/failed;
+`monitor_db_error` the only fatal; naive as_of rejected, normalized to UTC) + **Q6** `pipeline_runs.metrics`
+envelope returned on every terminal state + **Q7** Monitor is observability (5th `pipeline_runs` row),
+NOT part of the 4-agent prediction chain + **Q8** bulk `list_for_ids` (anti-N+1) + deferred
+Monitor-owned metrics (§M18 `bulk_read_failures`, §M21 feature-input/dtype-drift PSI, warn/alert
+classification).
+**Next:** **Orchestrator wiring** (the last open piece): DI adapter/agent-factory construction + a
+cron shim invoking `DailyPipeline.run_once()`, plus the sequential multi-agent loop under one shared
+`run_id` so the §L12 precondition gate fires end-to-end (Data → Research(prediction) →
+Modeling(prediction) → Briefing → **Monitor**, all now built). Owns **§N5** email-delivery
+idempotency/outbox. NB the daily pipeline runs ModelingAgent in **prediction** mode — **training** is
+a separate prerequisite job (`no_active_model`/`feature_set_mismatch` fail-fast otherwise).

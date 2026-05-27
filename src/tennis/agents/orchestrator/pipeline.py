@@ -59,6 +59,11 @@ _FATAL_CODES = frozenset(
         "no_qualifying_predictions",
         "smtp_send_failed",
         "briefing_db_error",
+        # Monitor (§Q5): only a DB/read failure is fatal. The benign "not enough
+        # data yet" codes `monitor_partial` / `monitor_no_active_model` stay OUT
+        # of this set (→ 'partial') — the Monitor is observability and "no data
+        # yet" is not an error (item 3).
+        "monitor_db_error",
     }
 )
 # Fixed, arbitrary key for the cluster-wide singleton advisory lock guarding the

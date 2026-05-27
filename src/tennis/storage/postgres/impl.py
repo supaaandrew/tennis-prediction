@@ -372,6 +372,28 @@ class MatchRepositoryImpl:
             o = s.get(m.Match, match_id)
             return _orm_to_row(o, MatchRow) if o else None
 
+    def list_for_ids(
+        self, *, match_ids: Sequence[int]
+    ) -> Mapping[int, MatchRow]:
+        """All matches among `match_ids`, keyed by match_id — the bulk dual of
+        `get` (§Q). Retires the Monitor's per-prediction `get` N+1: ONE IN-list
+        read per window instead of one point read per row (§M18 precedent). A
+        DB/IO failure is raised as a TYPED `StorageError` so the Monitor's
+        `run()` maps it to `monitor_db_error` (the §Q5 fatal path)."""
+        # Empty fast-path: no DB round-trip on empty input (contract).
+        if not match_ids:
+            return {}
+        # No IN-list chunking (v1): a monitor window is well within Postgres
+        # bind-param limits; mirrors the §M18 `list_for_player` accepted limit.
+        try:
+            with self._sf() as s:
+                rows = s.execute(
+                    select(m.Match).where(m.Match.match_id.in_(tuple(match_ids)))
+                ).scalars().all()
+                return {o.match_id: _orm_to_row(o, MatchRow) for o in rows}
+        except SQLAlchemyError as exc:
+            raise StorageError("Match.list_for_ids query failed") from exc
+
     def get_by_source(self, *, source: str, source_uid: str) -> MatchRow | None:
         with self._sf() as s:
             o = s.execute(
