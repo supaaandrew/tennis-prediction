@@ -1041,3 +1041,40 @@ M1b writes. Also still open: orchestrator wiring (DI adapter-factory + cron → 
 sequential multi-agent loop under one `run_id`). NB the daily pipeline runs ModelingAgent in
 **prediction** mode — **training** is a separate prerequisite job (M1b's `no_active_model` /
 `feature_set_mismatch` gates fail-fast without an active model).
+
+## Session 2026-05-26 — Briefing Agent (B1): predictions → Claude narrative → edge/Kelly email
+**Prompt:** Build the fourth/final pipeline agent (`agents/briefing/`): read the day's
+`predictions`, ask Claude for a narrative, render an edge/Kelly email, send it via SMTP. Lock
+§N1–§N4 first; defer RAG; never recompute edges/Kelly.
+**Shipped:** New `agents/briefing/`: `agent.py` (`BriefingAgent(Agent)` — precondition `modeling`
+succeeded; §N3 midnight-UTC slate window; active-`model_version` filter; per-side Shin→proportional
+edge classification; one degrade-safe LLM call; per-match context fault isolation §L2; SMTP send;
+§N4 status), `render.py` (pure: C13 disclaimer on every Kelly line, C9 NULL→"no market", §M24
+NULL-vs-0.0 distinction, closing fields structurally absent §M19/§15.4, `subject_template` fill),
+`llm_client.py` (`LlmClient` Protocol §N2 + `AnthropicLlmClient`), `email_client.py` (`EmailClient`
+Protocol §N2 + `SmtpEmailClient`; env creds/recipients via `read_required_env`, STARTTLS,
+`redact_text` §L10). `core/errors.py`: `BriefingError`/`BriefingLlmError`/`BriefingEmailError`.
+`pipeline._FATAL_CODES` += `no_qualifying_predictions`, `smtp_send_failed`, `briefing_db_error`
+(`briefing_partial` deliberately OUT → `partial`). Anthropic SDK 0.104.1 already in the venv.
+Tests **1112 → 1153 (+41)**, full unit suite green (no Docker, briefing tests 0.39s).
+**Codex findings:** 0 CRITICAL / 2 HIGH. **HIGH F1 (fixed)** — `_classify` selected the devig
+method per ROW (Shin if either side present), which could drop a real value side's proportional
+edge → switched to PER-SIDE Shin→proportional fallback (+5 mixed-permutation regression tests).
+Confirmed defensive: `compute_edges` (edge.py:59-64) writes Shin/proportional atomically per row,
+so the mixed case can't arise from the real writer — but the briefing reads `PredictionRow`
+decoupled from it. **HIGH F2 (deferred → §N5)** — non-idempotent SMTP send (manual re-run or
+crash-after-send can double-send). Concurrent double-send is already blocked by the §L7 advisory
+lock; a durable outbox needs a migration + its own decision → documented as a v1 limitation, owner
+= the orchestrator-wiring session. Auto-review (RUN REVIEW): the first fire reviewed the stale M1b
+diff (new files untracked); resolved with `git add -N` so the briefing diff was actually reviewed.
+**New locked decisions:** N1 (RAG deferred — `briefing.rag` present but not consumed) + N2 (LLM/Email
+are `@runtime_checkable` Protocols injected at ctor; tests always mock; secrets from env) + N3 (slate
+window = midnight-UTC of `as_of` date to +1 day, half-open) + N4 (status semantics: succeeded=sent;
+partial=sent + ≥1 no-market row or dead-letter; failed=no model / no qualifying edge / SMTP fail;
+NULL-edge-only slate → failed/zero-email; LLM failure non-fatal) + N5 (email-delivery idempotency
+DEFERRED v1).
+**Next:** **Monitor Agent** (`agents/monitor/`, AGENTS.md A13 — post-briefing, runs regardless of
+upstream status; ECE/PSI/ROI into `pipeline_runs.metrics`) and/or **Orchestrator wiring** (DI
+adapter-factory + cron → `DailyPipeline.run_once()`; the sequential multi-agent loop under one
+`run_id` that fires the §L12 precondition chain end-to-end). NB training is a separate prerequisite
+job; the daily pipeline runs ModelingAgent in prediction mode.

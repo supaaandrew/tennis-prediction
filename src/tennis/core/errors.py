@@ -165,6 +165,31 @@ class BacktestError(ModelingError):
 
 
 # ---------------------------------------------------------------------------
+# Briefing
+# ---------------------------------------------------------------------------
+class BriefingError(TennisError):
+    """Failure in the Briefing Agent (narrative generation or delivery)."""
+
+
+class BriefingLlmError(BriefingError):
+    """The LLM client could not return a narrative.
+
+    Wraps any SDK/HTTP failure from the narrative provider. The cause is
+    `redact_text`'d before it is logged/stored (§L10) because a transport
+    error can carry the API key in a URL/message. A briefing LLM failure is
+    NON-fatal (§N4): the email still sends without the narrative.
+    """
+
+
+class BriefingEmailError(BriefingError):
+    """The email could not be delivered (SMTP connect/auth/send failure).
+
+    Wraps any `smtplib`/transport failure. The cause is `redact_text`'d (§L10).
+    An SMTP failure IS fatal for the run (§N4): nothing was delivered.
+    """
+
+
+# ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
 class StorageError(TennisError):

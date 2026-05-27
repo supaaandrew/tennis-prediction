@@ -53,6 +53,12 @@ _FATAL_CODES = frozenset(
         # M1b prediction: the active model's feature family no longer matches the
         # config — the system is inconsistent, nothing usable can be scored.
         "feature_set_mismatch",
+        # Briefing (B1, §N4): all mean "no email was delivered" -> 'failed'. The
+        # `briefing_partial` code (some no-market rows / dead-lettered) stays OUT
+        # of this set, so it maps to 'partial'.
+        "no_qualifying_predictions",
+        "smtp_send_failed",
+        "briefing_db_error",
     }
 )
 # Fixed, arbitrary key for the cluster-wide singleton advisory lock guarding the

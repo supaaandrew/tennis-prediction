@@ -84,7 +84,8 @@
       "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit/core -q --no-header)",
       "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit -q --no-header)",
       "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit/models -q --no-header)",
-      "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit/models/test_splits.py -q --no-header)"
+      "Bash(PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/unit/models/test_splits.py -q --no-header)",
+      "Skill(codex:adversarial-review)"
     ]
   }
 }
