@@ -1,0 +1,36 @@
+# ============================================================================
+# Tennis Prediction Bot — environment variables
+# ============================================================================
+# Copy to `.env` and fill in real values for local dev.
+# In prod these come from the secrets manager — `.env` is never deployed.
+# Every name here is referenced from config/config.yaml via a `*_env` field.
+# core.config.validate_environment() fails loudly at startup if a required
+# one is missing for the active APP_ENV.
+# ============================================================================
+
+# --- app -------------------------------------------------------------------
+APP_ENV=dev                       # dev | staging | prod
+LOG_LEVEL=INFO
+
+# --- postgres (REQUIRED in all envs) ---------------------------------------
+DATABASE_URL=postgresql+psycopg://tennis:tennis@localhost:5432/tennis
+
+# --- qdrant (REQUIRED in prod; optional locally) ---------------------------
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=                   # leave empty for unauthenticated local qdrant
+
+# --- embeddings (REQUIRED in prod) -----------------------------------------
+VOYAGE_API_KEY=
+
+# --- data sources (REQUIRED in prod) ---------------------------------------
+OPENWEATHER_API_KEY=
+ODDS_API_KEY=
+
+# --- LLM (REQUIRED in prod) ------------------------------------------------
+ANTHROPIC_API_KEY=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
+
+# --- email delivery (REQUIRED in prod) -------------------------------------
+SMTP_HOST=smtp.gmail.com
+SMTP_USER=
+SMTP_PASSWORD=
+BRIEFING_RECIPIENTS=              # comma-separated list of emails

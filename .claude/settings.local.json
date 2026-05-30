@@ -90,7 +90,8 @@
       "Bash(PYTHONPATH=src /c/Users/Andrew/Documents/Tennis_Prediction_Bot/.venv/Scripts/python.exe -m pytest tests/unit -q)",
       "Bash(/c/Users/Andrew/Documents/Tennis_Prediction_Bot/.venv/Scripts/python.exe -m ruff check src/tennis/agents/orchestrator/pipeline.py)",
       "Bash(PYTHONPATH=src /c/Users/Andrew/Documents/Tennis_Prediction_Bot/.venv/Scripts/python.exe -m pytest tests/unit/test_composition.py tests/unit/agents/orchestrator/test_pipeline.py tests/unit/agents/briefing/test_agent.py -q)",
-      "Bash(/c/Users/Andrew/Documents/Tennis_Prediction_Bot/.venv/Scripts/python.exe -m ruff check src/tennis/composition.py src/tennis/agents/orchestrator/pipeline.py src/tennis/agents/briefing/agent.py)"
+      "Bash(/c/Users/Andrew/Documents/Tennis_Prediction_Bot/.venv/Scripts/python.exe -m ruff check src/tennis/composition.py src/tennis/agents/orchestrator/pipeline.py src/tennis/agents/briefing/agent.py)",
+      "WebFetch(domain:tennisapidoc.matchstat.com)"
     ]
   }
 }

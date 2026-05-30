@@ -80,6 +80,7 @@ class DataAgent:
         owm_factory: OwmFactory,
         venues: VenueRepository,
         venue_coords_path: str | Path = _DEFAULT_VENUE_COORDS_PATH,
+        scraper_required: bool = True,
     ) -> None:
         self._sackmann_factory = sackmann_factory
         self._scraper_factory = scraper_factory
@@ -87,6 +88,17 @@ class DataAgent:
         self._owm_factory = owm_factory
         self._venues = venues
         self._venue_coords_path = venue_coords_path
+        # §S6a: the daily `run` requires the ATP scraper (it supplies the live
+        # prediction slate). TRAINING does not — it consumes Sackmann `final`
+        # history only — so the training chain builds the DataAgent with
+        # scraper_required=False. This relaxes ONLY the scraper's operational-
+        # completeness gate: an absorbed operational failure (e.g. atptour.com's
+        # Cloudflare 403, which the adapter turns into failures>0/complete=False
+        # WITHOUT raising) no longer drops Data to `partial` or blocks
+        # Research/Modeling. An UNEXPECTED scraper exception (DI/parse/attr bug)
+        # STILL surfaces as an AgentError in BOTH modes — the §L2 unexpected-bug
+        # backstop is never masked just because the scraper is optional.
+        self._scraper_required = scraper_required
         # DataAgent is first in the chain -> no preconditions. The heartbeat
         # policy mirrors config; DailyPipeline reads orphan/interval seconds from
         # config directly for the run row + sweep.
@@ -130,7 +142,18 @@ class DataAgent:
         ctx.heartbeat()
         owm_ok = self._step_owm(ctx, metrics, errors)
 
-        ok = not errors and scraper_ok and sackmann_ok and odds_ok and owm_ok
+        # §S6a: the scraper's OPERATIONAL completeness gates Data only when
+        # required (the daily run). When optional (training), `scraper_ok` is
+        # dropped from the AND so an absorbed scraper failure (complete=False)
+        # does not pull Data below `succeeded`. An unexpected scraper EXCEPTION
+        # still gates here via `not errors` (it is captured as an AgentError).
+        ok = (
+            not errors
+            and sackmann_ok
+            and odds_ok
+            and owm_ok
+            and (scraper_ok or not self._scraper_required)
+        )
         return AgentResult(ok=ok, metrics=metrics, errors=tuple(errors))
 
     # -- adapter steps ------------------------------------------------------
@@ -145,9 +168,16 @@ class DataAgent:
                 "matches_skipped": r.matches_skipped,
                 "failures": r.failures,
                 "complete": r.complete,
+                "required": self._scraper_required,
             }
             return r.complete
         except Exception as exc:
+            # §S6a: an UNEXPECTED scraper exception ALWAYS surfaces as an
+            # AgentError (Data -> partial), in training too. The expected
+            # operational failure (Cloudflare 403) never reaches here — the
+            # adapter absorbs it into complete=False without raising — so this
+            # except is the §L2 backstop for real bugs and must not be masked by
+            # `scraper_required=False`.
             return _capture(
                 errors, metrics, "atp_scraper", "atp_scraper_error", exc,
                 {"matches_written": 0, "matches_skipped": 0},

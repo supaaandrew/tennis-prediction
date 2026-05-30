@@ -209,7 +209,7 @@ class _Wiring:
         return _make
 
     # -- agents -------------------------------------------------------------
-    def data_agent(self) -> DataAgent:
+    def data_agent(self, *, scraper_required: bool = True) -> DataAgent:
         return DataAgent(
             config=self._config,
             sackmann_factory=self._sackmann_factory(),
@@ -217,6 +217,7 @@ class _Wiring:
             odds_factory=self._odds_factory(),
             owm_factory=self._owm_factory(),
             venues=self.venues,
+            scraper_required=scraper_required,
         )
 
     def research_agent(self, *, mode: Literal["training", "prediction"]) -> ResearchAgent:
@@ -291,9 +292,20 @@ def build_training_chain(
     """Training chain (§S2): Data → Research(training) → Modeling(training) under
     one `run_id`. No Briefing/Monitor — training only ingests + trains + registers
     a model. Run by `python -m tennis train`, separate from the daily cron."""
-    w = _Wiring(config, session_factory=session_factory, validate_env=validate_env)
+    if validate_env:
+        # §S6a: training validates ONLY DB + source-adapter keys. It never builds
+        # the Briefing agent, so the briefing-only SMTP/Anthropic (and RAG
+        # Qdrant/Voyage) secrets must not be required — even in prod, where the
+        # full validate_environment would otherwise demand them.
+        validate_environment(
+            config,
+            deps=(*config.database.env_deps(), *config.sources.env_deps()),
+        )
+    w = _Wiring(config, session_factory=session_factory, validate_env=False)
     agents: list[Agent] = [
-        w.data_agent(),
+        # §S6a: training consumes Sackmann `final` history only, so a blocked ATP
+        # scraper (e.g. atptour.com Cloudflare 403) must not gate the chain.
+        w.data_agent(scraper_required=False),
         w.research_agent(mode="training"),
         w.modeling_agent(mode="training"),
     ]

@@ -605,17 +605,26 @@ def validate_environment(
     *,
     env: Env | None = None,
     environ: Sequence[tuple[str, str | None]] | None = None,
+    deps: Sequence[EnvDep] | None = None,
 ) -> None:
     """Fail loudly if any required env var is missing for the active env.
 
     `environ` is injectable for testing; defaults to `os.environ`.
+
+    `deps` restricts validation to a specific set of env descriptors. The
+    training chain (§S6a) passes only the DB + source-adapter deps so it does
+    NOT require the briefing-only SMTP/Anthropic (or RAG Qdrant/Voyage) secrets
+    it never constructs, even in prod. Defaults to the full `config.env_deps()`.
     """
     target: Env = env if env is not None else config.app.env
     lookup = dict(environ) if environ is not None else dict(os.environ)
+    candidates: Sequence[EnvDep] = (
+        deps if deps is not None else tuple(config.env_deps())
+    )
     missing = [
         dep.name
-        for dep in required_env_for(config, target)
-        if not (lookup.get(dep.name) or "").strip()
+        for dep in candidates
+        if dep.is_required(target) and not (lookup.get(dep.name) or "").strip()
     ]
     if missing:
         raise MissingEnvironmentError(missing=missing, env=target)

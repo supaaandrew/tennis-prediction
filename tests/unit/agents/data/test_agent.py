@@ -211,6 +211,7 @@ def _build(
     sackmann: _FakeSackmann, scraper: _FakeScraper,
     odds: _FakeOdds, owm: _FakeOwm, venues: _FakeVenues,
     venue_coords_path: str | Path = _NO_COORDS,
+    scraper_required: bool = True,
 ) -> tuple[DataAgent, dict[str, _Factory]]:
     factories = {
         "sackmann": _Factory(sackmann),
@@ -226,6 +227,7 @@ def _build(
         owm_factory=factories["owm"],  # type: ignore[arg-type]
         venues=venues,  # type: ignore[arg-type]
         venue_coords_path=venue_coords_path,
+        scraper_required=scraper_required,
     )
     return agent, factories
 
@@ -362,6 +364,87 @@ class TestFaultIsolation:
         assert result.ok is False
         assert result.errors == ()  # never threw — signal is result.complete
         assert result.metrics["odds"]["complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# §S6a — scraper optional for training (Cloudflare-blocked atptour.com must not
+# gate model training, which consumes Sackmann `final` history only)
+# ---------------------------------------------------------------------------
+class TestScraperOptional:
+    def test_required_false_tolerates_scraper_incomplete(self, config: AppConfig) -> None:
+        calls: list[tuple[str, str]] = []
+        # Scraper "succeeds" with failures>0 (the 403 path: adapter swallows the
+        # block into failures, returns complete=False, no exception).
+        scraper = _FakeScraper(calls=calls, result=ScraperResult(
+            tournaments_processed=0, matches_processed=0, matches_written=0,
+            matches_skipped=0, conflicts_flagged=0, failures=1))
+        agent, _ = _build(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls), scraper=scraper,
+            odds=_FakeOdds(calls=calls), owm=_FakeOwm(calls=calls),
+            scraper_required=False,
+        )
+        result = agent.run(_ctx(config))
+
+        assert result.ok is True  # Data succeeds despite the blocked scraper
+        assert result.errors == ()
+        assert result.metrics["atp_scraper"]["complete"] is False
+        assert result.metrics["atp_scraper"]["required"] is False
+
+    def test_required_false_still_surfaces_unexpected_scraper_exception(
+        self, config: AppConfig
+    ) -> None:
+        # §S6a: scraper_required=False relaxes ONLY the operational-completeness
+        # gate. An UNEXPECTED exception (a real bug — bad DI, parser regression)
+        # must STILL surface as an AgentError so it is not masked during
+        # training. The expected Cloudflare 403 never raises (the adapter absorbs
+        # it into complete=False) — that path is covered above.
+        calls: list[tuple[str, str]] = []
+        agent, _ = _build(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=_FakeScraper(calls=calls, exc=AttributeError("parser regression")),
+            odds=_FakeOdds(calls=calls), owm=_FakeOwm(calls=calls),
+            scraper_required=False,
+        )
+        result = agent.run(_ctx(config))
+
+        assert result.ok is False  # the bug is NOT masked, even when optional
+        assert [e.code for e in result.errors] == ["atp_scraper_error"]
+        assert result.metrics["atp_scraper"]["complete"] is False
+
+    def test_required_false_does_not_mask_other_adapter_failure(
+        self, config: AppConfig
+    ) -> None:
+        calls: list[tuple[str, str]] = []
+        odds = _FakeOdds(calls=calls, result=OddsResult(
+            events_processed=0, events_skipped=0, snapshots_inserted=0,
+            matches_touched=0, failures=1))  # a real downstream failure
+        agent, _ = _build(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=_FakeScraper(calls=calls),  # clean scraper isolates the odds failure
+            odds=odds, owm=_FakeOwm(calls=calls),
+            scraper_required=False,
+        )
+        result = agent.run(_ctx(config))
+
+        assert result.ok is False  # odds failure still downgrades Data
+
+    def test_required_true_default_still_gates_on_scraper(self, config: AppConfig) -> None:
+        calls: list[tuple[str, str]] = []
+        scraper = _FakeScraper(calls=calls, result=ScraperResult(
+            tournaments_processed=0, matches_processed=0, matches_written=0,
+            matches_skipped=0, conflicts_flagged=0, failures=1))
+        agent, _ = _build(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls), scraper=scraper,
+            odds=_FakeOdds(calls=calls), owm=_FakeOwm(calls=calls),
+        )  # scraper_required defaults True
+        result = agent.run(_ctx(config))
+
+        assert result.ok is False  # default behavior preserved (daily run)
+        assert result.metrics["atp_scraper"]["required"] is True
 
 
 # ---------------------------------------------------------------------------

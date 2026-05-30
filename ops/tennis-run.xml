@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Windows Task Scheduler definition: the daily prediction run at 06:30 UTC.
+
+  This is environment-specific deployment config (DECISIONS.md S7). It is NOT
+  registered automatically; see ops/README.md for the register/unregister
+  commands. Adjust the absolute paths below if the repo lives elsewhere or the
+  account differs.
+
+  StartBoundary ends with 'Z' so the trigger fires at 06:30 UTC regardless of
+  local timezone or DST. The principal uses InteractiveToken (runs only when the
+  account is logged on, no stored password). To run whether logged on or not,
+  switch LogonType to Password and register with -User/-Password (see runbook).
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>Andrew</Author>
+    <Description>Tennis Prediction Bot - daily prediction chain (python -m tennis run) at 06:30 UTC.</Description>
+    <URI>\TennisPredictionBot\tennis-run</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>2026-05-29T06:30:00Z</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>Andrew</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT15M</Interval>
+      <Count>2</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Command>
+      <Arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Users\Andrew\Documents\Tennis_Prediction_Bot\ops\run_daily.ps1"</Arguments>
+      <WorkingDirectory>C:\Users\Andrew\Documents\Tennis_Prediction_Bot</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

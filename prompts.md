@@ -1177,3 +1177,43 @@ Qdrant RAG (`storage/qdrant/`, §E1). The pipeline has NEVER run end-to-end agai
 scheduler/runbook. Optional hardening (each its own session): §S5 full outbox, §M3 weather
 interactions, §M11 rank PIT, §M19 odds_drift_to_close, §M18/§Q8 bulk_read_failures, §M21/§Q8
 dtype-drift PSI, §Q8 threshold classification.
+
+## Session 2026-05-28 — First live end-to-end run + deployment hardening
+**Prompt:** Take the feature-complete pipeline live for the first time against real Postgres +
+real external services: run migrations, build the Sackmann mirror sync, attempt `train` then `run`,
+fix real-data breakage (esp. the ATP scraper), and write the Windows scheduler + runbook.
+**Shipped:** NEW `scripts/sync_sackmann_mirror.py` (git clone/pull + `os.utime` dir-mtime refresh
+that defeats the §C5 staleness halt; 900s timeout; missing-git/timeout→`GitError`). NEW `ops/`
+deploy surface — `lib.ps1` (`Import-DotEnv` robust `.env` loader that preserves the space-bearing
+SMTP app password and strips inline comments, + `Invoke-Tennis`), `run_train.ps1`/`run_daily.ps1`
+wrappers, `tennis-run.xml` (Task Scheduler, 06:30 **UTC**, NOT auto-registered), `README.md` runbook.
+Modified `ops/alembic.ini` (`%(here)s`-anchored `script_location`/`prepend_sys_path` so the documented
+"run from repo root" resolves), `src/tennis/agents/data/agent.py` + `composition.py` + `core/config.py`
+(§S6a). Migrations 001→013 applied to Supabase (20 objects incl. `briefing_deliveries`). Live services
+verified: DB✓ Odds✓(200, 500 quota) OWM✓(200) scraper✗(Cloudflare 403). Tests **1209 → 1221 (+12)**,
+full unit green. The first full backfill is a multi-hour RESUMABLE job over remote Supabase (~80ms/row
+write) — documented + handed off, NOT run to completion in-session; Docker absent → integration-chain
+tests skipped.
+**Key finding:** atptour.com is Cloudflare-blocked — HTTP 403 even with a real browser User-Agent
+(verified live) — so the scraper supplies no slate and, under §L2, dropped Data to `partial` and
+blocked ALL training. Per the user's "if JS-gated, document and stop", the parser was left unchanged.
+**Codex findings:** RUN REVIEW (review.md) — **H1 (fixed)** `build_training_chain` ran full
+`validate_environment` requiring briefing secrets even though training never builds Briefing → added a
+`deps=` param so training validates only DB+source-adapter secrets; **H2 / M2 = FALSE POSITIVES**
+(branch field exists at `config.py:135`; `playwright>=1.45` at `pyproject.toml:33`) → branch contract
+locked by a test instead of a needless hardcode. Adversarial /codex:adversarial-review 0 CRITICAL /
+2 HIGH / 1 MEDIUM, all triaged VALID + fixed: **HIGH** machine-specific `local_mirror_dir` → kept OUT
+of the commit (local-only working-tree change; committed default stays repo-relative); **HIGH**
+optional-scraper `except` masked real bugs → narrowed so an UNEXPECTED scraper exception always
+surfaces as an `AgentError` in both modes (only the absorbed operational 403, complete=False, is
+tolerated in training); **MEDIUM** sync script no timeout / uncaught missing-git → 900s timeout +
+`FileNotFoundError`/`TimeoutExpired`→`GitError` (+2 tests).
+**New locked decisions:** **§S6a** — `DataAgent.scraper_required` flag (training sets it `False` so a
+Cloudflare-blocked scraper no longer gates the model; daily run keeps `True`); training-scoped env
+validation. Unexpected scraper exceptions still surface (Codex HIGH).
+**Next:** DEPLOYMENT ONLY. (1) Run the first **training backfill** to completion via
+`ops/run_train.ps1` (multi-hour, resumable; §S6 bootstrap; §S6a means the scraper no longer blocks it).
+(2) Register the **Task Scheduler** job (`ops/tennis-run.xml`, 06:30 UTC). (3) Resolve the **ATP
+scraper Cloudflare block** (headless browser via the Playwright dep, or an official slate feed) before
+the daily `run` can produce predictions/briefings. Plus the previously-deferred items (§N1 RAG, §S5
+outbox, §M3/§M11/§M19, §M18/§Q8 metrics).

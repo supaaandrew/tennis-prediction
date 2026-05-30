@@ -70,7 +70,7 @@ sources:
       rankings_glob: "atp_rankings_{decade}s.csv"
       players_file: "atp_players.csv"
     cache_dir: ".cache/sackmann"
-    local_mirror_dir: ".cache/sackmann/mirror"   # full repo snapshot per pull
+    local_mirror_dir: "C:/Users/Andrew/Documents/tennis_atp"   # full repo snapshot per pull
     pin_commit_sha: null                          # set to a SHA to lock a known-good revision
     max_staleness_days: 3                         # halts pipeline loudly if last pull older
     ranking_decades: ["90s", "00s", "10s", "20s"]

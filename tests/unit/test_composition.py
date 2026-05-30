@@ -64,6 +64,8 @@ class TestBuildTrainingChain:
         research, modeling = pipeline._agents[1], pipeline._agents[2]
         assert research._mode == "training"
         assert modeling._mode == "training"
+        # §S6a: training tolerates a blocked scraper (Sackmann history only).
+        assert pipeline._agents[0]._scraper_required is False
 
 
 class TestBuildDailyChain:
@@ -77,6 +79,8 @@ class TestBuildDailyChain:
         research, modeling = pipeline._agents[1], pipeline._agents[2]
         assert research._mode == "prediction"
         assert modeling._mode == "prediction"
+        # §S6a: the daily run REQUIRES the scraper (it supplies the live slate).
+        assert pipeline._agents[0]._scraper_required is True
 
     def test_monitor_omitted_when_run_monitor_flag_false(
         self, config: AppConfig, monkeypatch: pytest.MonkeyPatch
@@ -114,3 +118,36 @@ class TestSecretValidation:
         monkeypatch.delenv(config.sources.odds_api.api_key_env, raising=False)
         with pytest.raises(MissingEnvironmentError):
             build_daily_chain(config, session_factory=_fake_session_factory())
+
+
+class TestTrainingScopedValidation:
+    """§S6a: training validates only DB + source-adapter keys, never the
+    briefing-only secrets it does not construct — even in prod."""
+
+    def test_training_omits_briefing_secrets_in_prod_but_daily_requires_them(
+        self, config: AppConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        prod = config.model_copy(
+            update={"app": config.app.model_copy(update={"env": "prod"})}
+        )
+        # Only DB + the two source-adapter keys are present.
+        monkeypatch.setenv(prod.database.url_env, "postgresql+psycopg://u:p@h:5432/db")
+        monkeypatch.setenv(prod.sources.odds_api.api_key_env, "odds")
+        monkeypatch.setenv(prod.sources.openweather.api_key_env, "owm")
+        # The briefing-only secrets are absent.
+        for name in (
+            prod.briefing.llm.api_key_env,
+            prod.briefing.email.smtp.host_env,
+            prod.briefing.email.smtp.user_env,
+            prod.briefing.email.smtp.password_env,
+            prod.briefing.email.recipients_env,
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        # Training builds without raising — it never needs the briefing secrets.
+        pipeline = build_training_chain(prod, session_factory=_fake_session_factory())
+        assert _names(pipeline) == ["data", "research", "modeling"]
+
+        # The daily chain in prod DOES require them → fails loudly.
+        with pytest.raises(MissingEnvironmentError):
+            build_daily_chain(prod, session_factory=_fake_session_factory())
