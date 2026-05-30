@@ -40,6 +40,7 @@ Daily cron: 06:30 UTC. Postgres = source of truth.
 ✅ Monitor Agent     agents/monitor/{agent,__init__}.py (AGENTS.md A13) — post-pipeline observability, NOT in the 4-agent prediction chain; preconditions=() (runs regardless of upstream); per-window ECE/PSI/ROI over config.monitor.windows_days into pipeline_runs.metrics (§Q6 envelope). Realized-outcome join via NEW MatchRepository.list_for_ids (bulk, §M18 pattern); rolling-prev-window PSI (next-midnight UTC anchor); ECE/ROI reuse models.metrics + NEW population_stability_index. pipeline._FATAL_CODES += monitor_db_error (partial/no-active-model NON-fatal). §Q1-§Q8 locked. 1177 tests (post-review). Codex: 0 CRITICAL / 2 HIGH / 1 MEDIUM → F1 §Q6 envelope on db-error path, F2 bulk list_for_ids retires per-prediction N+1, F3 as_of normalized to UTC (all fixed). Still deferred to a future hardening session (§Q8): §M18 bulk_read_failures counter, §M21 feature-input/dtype-drift PSI, warn/alert threshold classification.
 ✅ Orchestrator wiring  §S — multi-agent sequential loop (DailyPipeline(agents) under one run_id: precondition-not-met→skip/no-row/continue, run()-raise→failed+continue so Monitor always runs, aggregate RunStatus) + DI composition root (composition.py + NEW HttpxClient transport in adapters/http_client.py: build_training_chain/build_daily_chain wire PostgresSessionFactory→repos→adapter-factory closures→LLM/SMTP clients from AppConfig+env, validate_environment fail-fast, lazy network) + CLI (cli.py typer `train`/`run` + __main__.py `python -m tennis`, §S8 exit codes) + §N5 RESOLVED (migration 013 briefing_deliveries, UNIQUE(briefing_day_utc,model_version), get-before-send skip / best-effort record-after-send). §S1-§S8 locked. 1209 tests (post-review). typer installed in venv. Codex: 0 CRITICAL / 1 HIGH / 1 MEDIUM + 1 reviewer-found gap → HIGH duplicate-send = locked §S5 residual (kept; hardened to ERROR pageable log); MEDIUM lock-acquisition error → restored PipelineStartupError (§L2); GAP run_monitor_post_briefing consumed nowhere → build_daily_chain now honors it (omits Monitor when False, §Q5/§Q7). OS scheduler (cron) + §N1 RAG (storage/qdrant) remain deployment/deferred.
 ✅ First live run + deploy  First execution vs real Postgres (Supabase) + real services. alembic 001→013 applied (20 objects incl. briefing_deliveries); ops/alembic.ini %(here)s-anchored. NEW scripts/sync_sackmann_mirror.py (git clone/pull + os.utime mtime refresh vs §C5 staleness; 900s timeout, missing-git→GitError). NEW ops/ deploy surface: lib.ps1 (Import-DotEnv .env loader + Invoke-Tennis), run_train.ps1/run_daily.ps1, tennis-run.xml (Task Scheduler 06:30 UTC, NOT auto-registered), README.md runbook. KEY FINDING: atptour.com is Cloudflare-blocked (HTTP 403 even with a browser UA, verified live) → under §L2 dropped Data to partial, blocking ALL training. FIX §S6a: DataAgent.scraper_required flag; build_training_chain sets it False so the scraper's OPERATIONAL incompleteness no longer gates training (Sackmann-history only) — but an UNEXPECTED scraper exception STILL surfaces as AgentError (Codex HIGH); build_training_chain also validates only DB+source-adapter secrets. Live: DB✓ Odds✓ OWM✓ scraper✗. First full backfill is a multi-hour RESUMABLE job over remote Supabase (~80ms/write) — run via ops/run_train.ps1, not completed in-session; Docker absent → integration tests skipped. config.yaml local_mirror_dir kept OUT of the commit (machine-specific, Codex HIGH). §S6a locked. 1221 tests. Codex: 0 CRITICAL / 2 HIGH / 1 MEDIUM all fixed.
+✅ §T matchstat swap   Matchstat (RapidAPI tennis-api-atp-wta-itf) REPLACES the Cloudflare-blocked ATP scraper as the daily slate source. NEW core.contracts.ScraperAdapter + ScraperFetchResult Protocols (§T1); migration 014 (matches.matchstat_id, §T10); MatchstatSource pydantic submodel + sources.matchstat: config block. NEW utils/score_parser.py (ParsedScore, §T4 — canonical for both sources; complete-sets-only counting). NEW adapters/matchstat/{client,models,parser,adapter,sidecars}.py: §T9 two-header auth, §T6 500/month quota counter persisted via ingest_watermarks (warn@400/raise@500), §T6 lookup cache persists data in cursor + serves within lookup_refresh_days (Codex H2 fix), §T8 paginate_all helper, §T7 string-typed field validators (odd→Decimal, seed verbatim + numeric, best_of→int), §T3 player1 convention split (parse_fixtures_page NEVER infers winner; parse_historical_match ALWAYS treats player1 as winner), §K1+§K3 Monday-anchored match_id, §K2 source_uid='matchstat:{id}', §T10 matchstat_id on BOTH the upsert AND the update_live_fields paths (Codex finding 1 — NULL-safe COALESCE equivalent in update_live_fields too), §K6 run-level zero-parse guard (Codex finding 2 — fails closed when whole-run total is zero while API responded 200; per-date zero stays INFO); sidecars MatchstatVenueGeocoder/MatchstatRankingsSeeder/MatchstatSearchEnricher/MatchstatH2hStatsClient built but consumers (DataAgent steps, SackmannResolver hook, H2HExtractor ctor) NOT YET WIRED — §T-2 carry-forward. composition.py: shared MatchstatClient, _scraper_factory swap, build_training_chain filters MATCHSTAT_API_KEY out (extends §S6a), narrowed except MissingEnvironmentError (Codex finding 4). 1293 tests (+72): 25 score_parser + 22 matchstat parser + 6 matchstat adapter (happy + live + quota degrade + matchstat_id-on-update-path + run-level zero-parse + per-date-zero tolerance) + 15 matchstat client (§T9 auth + 401/403/429/5xx mapping + §T6 quota counter + lookup cache fresh/stale/bad-cursor/read-fail/naive-tz, Codex finding 5) + 3 composition (matchstat-adapter wiring + daily-prod-key-required + training-filters-key) + 1 storage row matchstat_id. §T1–§T14 locked. Auto-review: 0 CRITICAL + 4 findings (H1 test assertion / H2 lookup cache / M1 calendar filter / M2 leaked key) all FIXED. Codex: 0 CRITICAL / 2 HIGH / 3 MEDIUM, ALL VALID + FIXED.
 
 ---
 
@@ -186,6 +187,69 @@ Match src/tennis/core/ style exactly:
   Still OPEN (Codex R6b M2, deferred): no run-level `bulk_read_failures`
   metric in `AgentResult.metrics` — the per-failure structured warning is
   the v1 observability hook; the future Monitor agent owns the metric/alert.
+
+## Carry-forward from T (matchstat slate adapter)
+The §T session swapped the daily slate source. The slate-fetch path is
+fully wired and tested. Four ride-along sidecars are constructed in
+composition but their consumers are NOT yet wired — schedule a follow-up
+**§T-2 session** before relying on them in prod:
+
+- **§T11 — `SackmannResolver` search-enricher hook.** `MatchstatSearchEnricher`
+  is built; the resolver's ctor does not yet take it. Add an optional
+  `search_enricher: MatchstatSearchEnricher | None = None` ctor dep, call
+  `.enrich(name)` in the DOB+country tiebreaker tier, land matchstat hits
+  into `player_aliases` with `source='matchstat'`, `confidence='exact'`
+  iff DOB AND country both agree with the Sackmann fuzzy candidate.
+- **§T12 — DataAgent `_step_matchstat_calendar`.** `MatchstatVenueGeocoder`
+  is built; `DataAgent` doesn't invoke it yet. Add a step BEFORE the YAML
+  pass inside `_step_geocode_venues` so calendar coords win when present
+  and the YAML stays as the §L11 fallback. Verify on at least one real
+  run before retiring `config/venue_coords.yaml`.
+- **§T13 — DataAgent `_step_matchstat_rankings`.** `MatchstatRankingsSeeder`
+  is built; `DataAgent` doesn't invoke it yet. Add a step between
+  `_step_odds` and `_step_owm` that calls `.populate(current_monday_utc)`.
+  The §M11 extractor itself is unchanged this session; tighten to
+  date-EXACT in the pressure-features session that consumes the same
+  endpoint for points-defending.
+- **§T14 — `H2HExtractor` clutch-fields extension.** Add optional
+  `h2h_stats_client: MatchstatH2hStatsClient | None = None` to the ctor;
+  emit 6 new keys (`p1/p2_h2h_deciding_set_wins / h2h_tiebreak_wins /
+  h2h_comeback_wins`) mapped from `playerNStats.{decidingSetWin,
+  tiebreakWon, firstSetLoseMatchWin}`. Append 6 `FeatureSpecRow` at
+  version 1 in `specs.py` `"h2h"` tuple. Extend the specs round-trip
+  test to 13 keys; add a regression test pinning the field-name mapping.
+- **§T5 startup TourRank assertion.** The IDs `1=GS, 2=Masters1000,
+  3=ATP500, 4=ATP250` are pinned in `config.sources.matchstat.tier_ids`
+  but never verified live. Add a one-shot `MatchstatClient.verify_tier_ids()`
+  that fetches `/tennis/v2/ranking` and rejects if the names diverge from
+  the `_TIER_NAME_TO_ENUM` map in `parser.py`.
+- **Live-API fixture-capture script.** `scripts/capture_matchstat_fixtures.py`
+  was specced but not written. Once `.env` has `MATCHSTAT_API_KEY`,
+  capture ≥ 1 representative JSON per endpoint into
+  `tests/fixtures/matchstat/` and replace the inline synthesized
+  payloads in `test_parser.py` / `test_adapter.py` so parser tests bind
+  to real upstream shapes.
+
+**Known v1 limitations (accepted; documented in §T):**
+- Cross-source `match_id` agreement between Sackmann and matchstat
+  depends on tournament slugs aligning. The matchstat slug is derived
+  via `_slugify(tournament.site or tournament.name)`; this won't always
+  match Sackmann's slug for the same logical event. When they diverge,
+  the two sources write distinct match rows. A follow-up slug-canon
+  lookup table closes this; accepted v1 because matchstat is
+  forward-looking (fixtures) and Sackmann is historical (finals) —
+  cross-source dedup is a bonus, not the daily run's correctness path.
+- `MatchstatRankingsSeeder` skips rows whose player cannot be resolved
+  via `player_aliases` — aggressive shadow minting from the rankings
+  endpoint is out of v1 scope.
+- §T6 quota burn rate is not yet in the §Q Monitor envelope. The §T-2
+  session should add `metrics['matchstat']['quota_remaining']` from
+  `MatchstatClient.quota_remaining`.
+
+**Security note (out of scope for §T, flag to operator):**
+`.env.example` line 30 contains a literal `ANTHROPIC_API_KEY=sk-ant-…`
+value (not a placeholder). If that key is real and the file is committed,
+rotate the key immediately and replace the line with an empty placeholder.
 
 ---
 

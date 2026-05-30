@@ -37,9 +37,12 @@ Exit code (S8): `1` iff some agent that ran ended `failed`; `partial`,
    .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
    ```
 2. **`.env`** at the repo root (gitignored — never commit it). Required keys:
-   `DATABASE_URL`, `ODDS_API_KEY`, `OPENWEATHER_API_KEY`, `ANTHROPIC_API_KEY`,
-   `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, `BRIEFING_RECIPIENTS`. (Training
-   needs only `DATABASE_URL` + the four adapter keys; the daily run also needs
+   `DATABASE_URL`, `ODDS_API_KEY`, `OPENWEATHER_API_KEY`, `MATCHSTAT_API_KEY`,
+   `ANTHROPIC_API_KEY`, `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`,
+   `BRIEFING_RECIPIENTS`. (Training needs only `DATABASE_URL` + the source-
+   adapter keys EXCEPT `MATCHSTAT_API_KEY` — §T1 extension of §S6a filters
+   matchstat out of training validation, so a training backfill works without
+   a matchstat subscription. The daily run requires the matchstat key plus
    Anthropic + SMTP + recipients.)
    - **The app does NOT autoload `.env`** — it reads `os.environ` directly. Every
      invocation must export it first. `Import-DotEnv` in `lib.ps1` does this and
@@ -92,22 +95,37 @@ row, so the first full backfill is a **multi-hour job** (players file alone is
   optimization (bulk/`COPY` inserts, dropping the read-back) would cut the backfill
   dramatically.
 
-## Known limitation: the ATP scraper is Cloudflare-blocked
+## Slate source: matchstat (§T1) — ATP scraper retired
 
-`atptour.com` is behind Cloudflare bot management and returns **HTTP 403 even
-with a real browser User-Agent** (a JS-challenge interstitial, no match HTML). The
-fixture-validated selectors in `adapters/atp_scraper/parser.py` therefore cannot
-be re-derived from live HTML (K5/K6), and the scraper supplies no live slate.
+The Cloudflare-blocked `atptour.com` scraper is **no longer the slate source**.
+The daily slate now comes from **matchstat** (RapidAPI
+`tennis-api-atp-wta-itf.p.rapidapi.com`) — a clean JSON API that fills the
+same `ScraperAdapter` Protocol seam (§T1). `adapters/atp_scraper/` stays in
+the tree as a regression-test baseline; composition no longer instantiates it.
 
-- **Training is unaffected** (S6a): the training chain builds the DataAgent with
-  `scraper_required=False`, so a scraper failure no longer drops Data to `partial`
-  or blocks Research/Modeling. Training uses Sackmann `final` history only.
-- **The daily run still needs the scraper** for a non-empty prediction slate. Until
-  it is solved the daily chain ingests no upcoming matches, so it produces no
-  predictions and sends no briefing (N4 zero-email).
-- **Remediation paths** (future extensions, out of scope here): a headless browser
-  (Playwright is already a dependency) to pass the JS challenge, a Cloudflare-bypass
-  service, or an official ATP/data-feed source for the slate.
+- **Subscription:** subscribe to the free tier at
+  `https://rapidapi.com/tennis-live-data/api/tennis-api-atp-wta-itf` and put
+  the key in `.env` as `MATCHSTAT_API_KEY=…`. Free tier = **500 requests /
+  month**.
+- **Quota guardrails (§T6):** the in-process counter is persisted via
+  `ingest_watermarks` `(source='matchstat', scope='quota')` so a process
+  restart does not reset it. The client **warns at 400 requests** (structured
+  log `matchstat_quota_warn`) and **raises `MatchstatQuotaExhaustedError` at
+  500** before issuing the 501st call. Quota exhaustion mid-run degrades the
+  daily run to `partial` — it never crashes.
+- **Daily burn rate:** fixtures (≈ 6 req for today + 2-day lookforward)
+  dominates. Once the four sidecars (§T11/§T12/§T13/§T14 — see the §T-2
+  follow-up in CLAUDE.md "Carry-forward from T") are wired the daily burn
+  rises to ~19–24 req; monthly ~600–750 req — over the free 500 tier. Upgrade
+  to a paid tier OR keep the sidecars dark until the §T-2 session lands the
+  burn-rate metric in the Monitor envelope.
+- **Player1 convention** (§T3): `parser.parse_fixtures_page` NEVER infers a
+  winner (fixtures are forward-looking); `parser.parse_historical_match`
+  ALWAYS treats `player1` as the winner. Tested explicitly — see
+  `tests/unit/adapters/matchstat/test_parser.py`.
+- **Training is unaffected** (§T1 extension of §S6a): `build_training_chain`
+  filters `MATCHSTAT_API_KEY` out of validation deps, so a training backfill
+  runs on a machine that has no matchstat subscription.
 
 ## Reading a run's outcome
 

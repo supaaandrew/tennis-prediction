@@ -18,9 +18,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from tennis.adapters.atp_scraper.adapter import AtpScraperAdapter
-from tennis.adapters.atp_scraper.client import HttpAtpScraperClient
 from tennis.adapters.http_client import HttpxClient
+from tennis.adapters.matchstat.adapter import MatchstatScraperAdapter
+from tennis.adapters.matchstat.client import MatchstatClient
+from tennis.adapters.matchstat.sidecars import (
+    MatchstatRankingsSeeder,
+    MatchstatVenueGeocoder,
+)
 from tennis.adapters.odds.adapter import OddsApiAdapter
 from tennis.adapters.odds.client import HttpOddsApiClient
 from tennis.adapters.owm.adapter import OWMAdapter
@@ -41,6 +45,7 @@ from tennis.agents.orchestrator.pipeline import DailyPipeline
 from tennis.agents.research.agent import ResearchAgent
 from tennis.core.clock import Clock, RealClock
 from tennis.core.config import AppConfig, read_required_env, validate_environment
+from tennis.core.errors import MissingEnvironmentError
 from tennis.core.logging import get_logger
 from tennis.storage.postgres import impl
 from tennis.storage.postgres.session import PostgresSessionFactory
@@ -111,6 +116,35 @@ class _Wiring:
         # One shared HTTP transport for every network adapter (§S7).
         self._http = HttpxClient()
 
+        # §T1 — one shared MatchstatClient per process. Builds the §T6 quota
+        # counter (persisted via watermarks) and the §T9 auth headers once
+        # so the slate adapter, the calendar geocoder, and the rankings
+        # seeder all share one counter + one cache. `api_key` is None when
+        # the source is disabled (training-only wiring without a key); the
+        # client raises `MatchstatAuthError` lazily on first call.
+        ms_cfg = self._config.sources.matchstat
+        self._matchstat_api_key: str | None = None
+        if ms_cfg.enabled:
+            try:
+                self._matchstat_api_key = read_required_env(ms_cfg.api_key_env)
+            except MissingEnvironmentError:
+                # §T1 extension of §S6a — training chains intentionally skip
+                # the matchstat key. `validate_environment` already raised in
+                # the daily chain, so reaching here means the chain is
+                # training-only and a missing key is expected. Any OTHER
+                # exception (NameError, AttributeError, programmer bug)
+                # propagates so wiring defects fail at construction, not
+                # later as a confusing `MatchstatAuthError` at first call
+                # (Codex finding 4).
+                self._matchstat_api_key = None
+        self._matchstat_client = MatchstatClient(
+            config=ms_cfg,
+            http=self._http,
+            api_key=self._matchstat_api_key,
+            clock=RealClock(),
+            watermarks=self.watermarks,
+        )
+
     # -- adapter factories (Callable[[Clock, UUID], Adapter]) ---------------
     def _sackmann_factory(self):
         cfg = self._config
@@ -144,11 +178,14 @@ class _Wiring:
         return _make
 
     def _scraper_factory(self):
+        # §T1 — matchstat REPLACES the Cloudflare-blocked atp_scraper as the
+        # daily slate source. `MatchstatScraperAdapter` satisfies the
+        # `core.contracts.ScraperAdapter` Protocol so DataAgent is unchanged.
         cfg = self._config
-        client = HttpAtpScraperClient(config=cfg, http=self._http)
+        client = self._matchstat_client
 
-        def _make(clock: Clock, run_id: UUID) -> AtpScraperAdapter:
-            return AtpScraperAdapter(
+        def _make(clock: Clock, run_id: UUID) -> MatchstatScraperAdapter:
+            return MatchstatScraperAdapter(
                 config=cfg,
                 clock=clock,
                 client=client,
@@ -159,6 +196,27 @@ class _Wiring:
                 watermarks=self.watermarks,
                 dead_letter=self.dead_letter,
                 run_id=run_id,
+            )
+
+        return _make
+
+    # §T12 / §T13 — sidecar factories (calendar + rankings). DataAgent's
+    # new optional steps consume these when the matchstat key is configured;
+    # absent key → factories build no-op-degrading sidecars.
+    def _matchstat_calendar_factory(self):
+        client = self._matchstat_client
+
+        def _make() -> MatchstatVenueGeocoder:
+            return MatchstatVenueGeocoder(client=client, venues=self.venues)
+
+        return _make
+
+    def _matchstat_rankings_factory(self):
+        client = self._matchstat_client
+
+        def _make() -> MatchstatRankingsSeeder:
+            return MatchstatRankingsSeeder(
+                client=client, aliases=self.aliases, rankings=self.rankings
             )
 
         return _make
@@ -297,9 +355,18 @@ def build_training_chain(
         # the Briefing agent, so the briefing-only SMTP/Anthropic (and RAG
         # Qdrant/Voyage) secrets must not be required — even in prod, where the
         # full validate_environment would otherwise demand them.
+        # §T1 extension: training never builds matchstat either — the daily
+        # SLATE is matchstat-only; training reads Sackmann history. The
+        # matchstat key is filtered out of the training deps so a training
+        # backfill can run on a machine that has no matchstat subscription.
+        matchstat_env = config.sources.matchstat.api_key_env
         validate_environment(
             config,
-            deps=(*config.database.env_deps(), *config.sources.env_deps()),
+            deps=tuple(
+                d
+                for d in (*config.database.env_deps(), *config.sources.env_deps())
+                if d.name != matchstat_env
+            ),
         )
     w = _Wiring(config, session_factory=session_factory, validate_env=False)
     agents: list[Agent] = [

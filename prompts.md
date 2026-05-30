@@ -1217,3 +1217,82 @@ validation. Unexpected scraper exceptions still surface (Codex HIGH).
 scraper Cloudflare block** (headless browser via the Playwright dep, or an official slate feed) before
 the daily `run` can produce predictions/briefings. Plus the previously-deferred items (§N1 RAG, §S5
 outbox, §M3/§M11/§M19, §M18/§Q8 metrics).
+
+
+## Session 2026-05-30 — §T Matchstat slate adapter (unblock the daily run)
+**Prompt:** The Cloudflare-blocked ATP scraper produced zero predictions on the first live run.
+Swap the daily slate source to matchstat (RapidAPI `tennis-api-atp-wta-itf`) behind a new abstract
+`core.contracts.ScraperAdapter` Protocol so DataAgent code is unchanged. Build the adapter, the
+score parser (canonical for both sources), the H2 quota cache, four sidecar helpers, and the
+storage column. Lock §T1–§T14.
+**Shipped:** NEW `core.contracts.ScraperAdapter` + `ScraperFetchResult` Protocols (the §T1 seam
+the matchstat adapter satisfies structurally; DataAgent reads only the four fields it always read).
+NEW migration **014** (`matches.matchstat_id INTEGER NULL` + partial index, §T10) + `MatchRow`/ORM
+column + `MatchRepositoryImpl.upsert` `COALESCE` so the sidecar id is never clobbered. NEW
+`MatchstatAuthError` + `MatchstatQuotaExhaustedError` typed errors. NEW `MatchstatSource` pydantic
+submodel + `sources.matchstat:` config block + `.env.example` line. NEW `tennis.utils.score_parser`
+(`ParsedScore`/`parse_score`/`ScoreParseError`, §T4 — complete-sets-only counting, retirement/walkover/
+tiebreak detection, the "caller maps first-listed↔winner" contract). NEW `adapters/matchstat/`
+package: `client.py` (§T9 two-header auth, §T6 monthly quota counter persisted via `ingest_watermarks`
+with warn@400 / raise@500 / stale-month reset, §T8 `paginate_all` helper, 401/403→`MatchstatAuthError`
+/ 429→`RateLimitError` / 5xx→`UpstreamUnavailableError` mapping, lookup-table cache persisting BOTH
+fetched_at AND response data so subsequent runs serve from the cursor — H2/Codex finding 5 fix),
+`models.py` (pydantic v2 DTOs with §T7 string-typed field validators: `odd1/odd2`→`Decimal|None`,
+`seed1/seed2` verbatim + parsed `seed_numeric: int|None` that NEVER becomes 0 for seed codes,
+`best_of`→`int|None`, `birthday`→`date|None`), `parser.py` (the §T3 player1 convention split:
+`parse_fixtures_page` NEVER infers a winner, `parse_historical_match` ALWAYS treats player1 as
+winner; §K3 Monday-anchored slug derivation), `adapter.py` (slate fetch over `[today, today+
+lookforward_days]`; `match_id` via `compute_match_id` with §K3; `source='matchstat'`,
+`source_uid='matchstat:{id}'`, `matchstat_id` populated on BOTH the upsert and update_live_fields
+paths — Codex finding 1; run-level zero-parse guard — Codex finding 2), `sidecars.py`
+(`MatchstatVenueGeocoder`, `MatchstatRankingsSeeder`, `MatchstatSearchEnricher`,
+`MatchstatH2hStatsClient` — wired into composition; **consumers deferred to §T-2**). `composition.py`:
+shared `MatchstatClient` (one quota counter), `_scraper_factory` swap to matchstat, sidecar
+factories, `build_training_chain` filters `MATCHSTAT_API_KEY` out of validation deps (extends §S6a),
+narrowed `except MissingEnvironmentError` (Codex finding 4). `agents/data/agent.py`: retyped
+`ScraperFactory` to the abstract Protocol. `storage/postgres/repositories.py` + `impl.py`:
+`update_live_fields` gained optional `matchstat_id: int | None = None` (NULL-safe; Codex finding 1
++ 3). Tests **1221 → 1293 (+72)**: 25 score_parser + 22 matchstat parser (§T3 fixture+historical
+pinning + §T7 string-typing + §C3 tier-drop) + 6 matchstat adapter (happy-path + live status +
+§T6 quota degrade + matchstat_id-on-update-path + run-level zero-parse fires + per-date zero
+tolerated) + 15 matchstat client (§T9 auth headers + 401/403/429/5xx mapping + §T6 quota
+persistence/restart-load/warn/raise/stale-month-reset + lookup cache fresh/stale/bad-cursor/
+read-fail/naive-tz) + 3 composition (matchstat-adapter wired + daily-prod-key-required +
+training-filters-key) + 1 storage row matchstat_id round-trip.
+**Codex findings:** Auto-review (RUN REVIEW) — **0 CRITICAL**; **H1** broken `start_ts` test
+assertion → replaced with `tzinfo=timezone.utc`; **H2** lookup-cache miss-on-restart (load-bearing
+for 500/month quota) → fixed: now persists data in cursor + serves from it within
+`lookup_refresh_days` via `Clock.now()`; **M1** calendar sidecar missing TourRank filter → added
+`tier_ids` forwarding; **M2** literal `ANTHROPIC_API_KEY=sk-ant-…` in `.env.example` → replaced with
+placeholder (KEY ROTATION REQUIRED at console.anthropic.com — already in git history).
+Adversarial /codex:adversarial-review **0 CRITICAL / 2 HIGH / 3 MEDIUM, ALL VALID + FIXED**:
+**HIGH 1** `matchstat_id` silently dropped on `update_live_fields` (Sackmann-first rows would keep
+matchstat_id=NULL forever) → extended Protocol + impl with optional `matchstat_id` (NULL-safe
+COALESCE-equivalent); adapter passes `fx.matchstat_id` on merge path; +1 regression test.
+**HIGH 2** §K6 zero-parse guard relaxed in matchstat → silent empty-slate risk on parser/filter
+regression → added run-level `pages_with_data` + `successful_calls` to `_Batch`; `fetch()` fails
+closed when whole-run total is zero while API was responding 200; per-date zero stays INFO; +2
+regression tests. **MEDIUM 3** dup of HIGH 1 (impl side). **MEDIUM 4** bare `except Exception` in
+`_Wiring.__init__` would swallow programmer bugs → narrowed to `MissingEnvironmentError`.
+**MEDIUM 5** `matchstat/client.py` had zero unit tests → new `test_client.py` (15 tests via
+`httpx.MockTransport`).
+**New locked decisions:** **§T1–§T14** (in the §M decision table per the §N/§Q/§S convention).
+§T1 Protocol seam; §T2 fixtures filter; §T3 player1 convention split; §T4 canonical score parser;
+§T5 TourRank IDs; §T6 quota guardrails + lookup cache; §T7 string-typed fields; §T8 mandatory
+pagination; §T9 two-header auth; §T10 sidecar `matchstat_id` column; §T11/§T12/§T13/§T14 sidecars
+(built + factory-wired; consumers deferred to §T-2). All Codex fixes documented inline in the §T
+row of §14 commit summary.
+**Next:** **§T-2 sidecar consumer wiring + first real daily run**. (1) `SackmannResolver.
+search_enricher` ctor hook (§T11) — DOB+country tiebreaker for the long-tail player resolution.
+(2) `DataAgent._step_matchstat_calendar` (§T12) — calendar geocoder upserts `venues.lat/lon`
+before the YAML fallback; verify on one real run then retire `venue_coords.yaml`. (3)
+`DataAgent._step_matchstat_rankings` (§T13) — date-filtered Top-200 seeding for `latest_before`;
+§M11 extractor itself tightens in the pressure-features session. (4) `H2HExtractor` extension
+(§T14) — optional `h2h_stats_client` ctor dep + 6 new keys (`p{1,2}_h2h_deciding_set_wins/
+h2h_tiebreak_wins/h2h_comeback_wins`) + `feature_specs` rows at v1 + round-trip test + field-name
+pinning regression. (5) §T5 startup TourRank assertion against `/tennis/v2/ranking`. (6) Live-API
+fixture-capture script (`scripts/capture_matchstat_fixtures.py`) to replace synthesized JSON.
+(7) §T6 quota burn rate metric exposed in the §Q Monitor envelope. THEN the previously-deferred
+deployment work: training backfill, Task Scheduler register, subscribe to matchstat + add key
+to .env. **Pre-commit operator action:** rotate the leaked `ANTHROPIC_API_KEY` at
+console.anthropic.com.

@@ -42,6 +42,7 @@ def _set_all_secrets(monkeypatch: pytest.MonkeyPatch, config: AppConfig) -> None
     monkeypatch.setenv(config.database.url_env, "postgresql+psycopg://u:p@localhost/db")
     monkeypatch.setenv(config.sources.odds_api.api_key_env, "dummy-odds")
     monkeypatch.setenv(config.sources.openweather.api_key_env, "dummy-owm")
+    monkeypatch.setenv(config.sources.matchstat.api_key_env, "dummy-matchstat")
     monkeypatch.setenv(config.briefing.llm.api_key_env, "dummy-anthropic")
     monkeypatch.setenv(config.briefing.email.smtp.host_env, "smtp.example.com")
     monkeypatch.setenv(config.briefing.email.smtp.user_env, "mailer")
@@ -100,6 +101,39 @@ class TestBuildDailyChain:
         assert "monitor" not in names
 
 
+class TestT1MatchstatWiring:
+    """§T1 — the scraper-factory slot now builds `MatchstatScraperAdapter`,
+    not the deprecated `HttpAtpScraperClient`. The daily chain in prod
+    requires `MATCHSTAT_API_KEY`; training never does (§T1 extension of §S6a)."""
+
+    def test_scraper_factory_builds_matchstat_adapter(
+        self, config: AppConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from tennis.adapters.matchstat.adapter import MatchstatScraperAdapter
+        from tennis.core.clock import FrozenClock
+
+        _set_all_secrets(monkeypatch, config)
+        pipeline = build_daily_chain(config, session_factory=_fake_session_factory())
+        data_agent = pipeline._agents[0]
+        clock = FrozenClock(datetime(2026, 5, 30, tzinfo=UTC))
+        scraper = data_agent._scraper_factory(clock, uuid4())
+        assert isinstance(scraper, MatchstatScraperAdapter)
+
+    def test_daily_in_prod_requires_matchstat_key(
+        self, config: AppConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        prod = config.model_copy(
+            update={"app": config.app.model_copy(update={"env": "prod"})}
+        )
+        _set_all_secrets(monkeypatch, prod)
+        monkeypatch.delenv(prod.sources.matchstat.api_key_env, raising=False)
+        with pytest.raises(MissingEnvironmentError):
+            build_daily_chain(prod, session_factory=_fake_session_factory())
+
+
 class TestSecretValidation:
     def test_missing_database_url_raises(
         self, config: AppConfig, monkeypatch: pytest.MonkeyPatch
@@ -134,13 +168,17 @@ class TestTrainingScopedValidation:
         monkeypatch.setenv(prod.database.url_env, "postgresql+psycopg://u:p@h:5432/db")
         monkeypatch.setenv(prod.sources.odds_api.api_key_env, "odds")
         monkeypatch.setenv(prod.sources.openweather.api_key_env, "owm")
-        # The briefing-only secrets are absent.
+        # The briefing-only secrets are absent. The matchstat key is ALSO
+        # absent — §T1 extension of §S6a: training never builds the matchstat
+        # slate adapter, so its key is filtered out of training validation
+        # deps and a training backfill works on a machine without it.
         for name in (
             prod.briefing.llm.api_key_env,
             prod.briefing.email.smtp.host_env,
             prod.briefing.email.smtp.user_env,
             prod.briefing.email.smtp.password_env,
             prod.briefing.email.recipients_env,
+            prod.sources.matchstat.api_key_env,
         ):
             monkeypatch.delenv(name, raising=False)
 

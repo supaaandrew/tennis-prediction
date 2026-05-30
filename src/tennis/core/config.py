@@ -196,15 +196,49 @@ class OddsApiSource(_Section):
         )
 
 
+class MatchstatSource(_Section):
+    # §T1 — canonical daily slate source. §T6 quota guardrails are config-
+    # driven (`monthly_quota`/`quota_warn_at`) so tier-upgrade is one YAML
+    # change. The auth header pair (§T9) is `X-RapidAPI-Key` (from
+    # `api_key_env`) + `X-RapidAPI-Host` (from `host`).
+    enabled: bool = True
+    api_key_env: str = "MATCHSTAT_API_KEY"
+    host: str = "tennis-api-atp-wta-itf.p.rapidapi.com"
+    base_url: str = "https://tennis-api-atp-wta-itf.p.rapidapi.com"
+    # All four must be positive — a zero/negative quota or throttle would
+    # degenerate the §T6 counter math silently.
+    monthly_quota: int = Field(default=500, gt=0)
+    quota_warn_at: int = Field(default=400, gt=0)
+    per_minute_throttle: int = Field(default=100, gt=0)
+    rate_limit_rps: float = Field(default=1.0, gt=0.0)
+    request_timeout_s: int = Field(default=30, gt=0)
+    lookforward_days: int = Field(default=2, gt=0)
+    tier_ids: tuple[int, ...] = (1, 2, 3, 4)   # §T5 — verified at adapter startup
+    lookup_refresh_days: int = Field(default=7, gt=0)
+
+    def env_deps(self) -> Iterator[EnvDep]:
+        # §T1 extension of §S6a — the key is treated as a source-adapter
+        # secret. Training without it skips the matchstat sidecars and
+        # validates only DB + source deps. The daily chain requires the key.
+        yield EnvDep(
+            name=self.api_key_env,
+            description="Matchstat (RapidAPI) API key",
+            required_in=("staging", "prod"),
+        )
+
+
 class SourcesSection(_Section):
     sackmann: SackmannSource
     atp_scraper: AtpScraperSource
     openweather: OpenWeatherSource
     odds_api: OddsApiSource
+    matchstat: MatchstatSource = Field(default_factory=MatchstatSource)
 
     def env_deps(self) -> Iterator[EnvDep]:
         yield from self.openweather.env_deps()
         yield from self.odds_api.env_deps()
+        if self.matchstat.enabled:
+            yield from self.matchstat.env_deps()
 
 
 # --- ingestion / features / modeling --------------------------------------

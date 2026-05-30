@@ -139,6 +139,10 @@ class MatchRow:
     walkover: bool = False
     intraday_conflict: bool = False
     match_date_source: MatchDateSource | None = None
+    # §T10 — matchstat fixture id for forward joins (tournament-specific match
+    # stats etc.). NULL on every pre-matchstat row by design; only the
+    # matchstat slate adapter populates it.
+    matchstat_id: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

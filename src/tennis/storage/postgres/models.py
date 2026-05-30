@@ -181,6 +181,8 @@ class Match(Base):
     match_date_source: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(Text, nullable=False)
     source_uid: Mapped[str] = mapped_column(Text, nullable=False)
+    # Migration 014, §T10 — matchstat fixture id for forward joins.
+    matchstat_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

@@ -61,6 +61,30 @@ class HttpClient(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Scraper-Protocol seam (§T1) — the slate-fetching adapter.
+# DataAgent._step_scraper depends on this surface, not a concrete class, so a
+# JSON-API replacement (matchstat) drops in alongside the deprecated HTML
+# scraper. Both adapters' result dataclasses satisfy ScraperFetchResult
+# structurally — DataAgent reads only the four fields named here.
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class ScraperFetchResult(Protocol):
+    matches_written: int
+    matches_skipped: int
+    failures: int
+    complete: bool
+
+
+@runtime_checkable
+class ScraperAdapter(Protocol):
+    """The slate-fetching adapter surface DataAgent consumes (§T1).
+    Implemented by `AtpScraperAdapter` (deprecated, Cloudflare-blocked) and
+    `MatchstatScraperAdapter` (canonical from §T1 onwards)."""
+
+    def fetch(self) -> ScraperFetchResult: ...
+
+
+# ---------------------------------------------------------------------------
 # Agent framework — the Pipeline talks to these, not concrete agents
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
@@ -155,6 +179,8 @@ __all__ = [
     "Clock",
     "HttpResponse",
     "HttpClient",
+    "ScraperFetchResult",
+    "ScraperAdapter",
     "AgentError",
     "AgentResult",
     "AgentContext",

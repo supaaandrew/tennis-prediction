@@ -64,6 +64,28 @@ class UpstreamUnavailableError(AdapterError):
     """Upstream returned 5xx, timeout, or connection error."""
 
 
+class MatchstatAuthError(AdapterError):
+    """Matchstat (RapidAPI) rejected the credentials (HTTP 401/403).
+
+    Raised by `MatchstatClient` when the API returns 401 or 403 — either the
+    `X-RapidAPI-Key` is missing/invalid or the `X-RapidAPI-Host` header does
+    not match the configured host (§T9). Retrying cannot help; the runbook
+    diagnosis is "check `MATCHSTAT_API_KEY` and `sources.matchstat.host`".
+    """
+
+
+class MatchstatQuotaExhaustedError(AdapterError):
+    """Matchstat free-tier monthly quota (500/month) has been exhausted (§T6).
+
+    Raised at the 501st call within the current UTC calendar month. The
+    counter is persisted via `IngestWatermarkRepository` under
+    `(source='matchstat', scope='quota')`, so a process restart does not reset
+    it. The slate adapter catches this at its boundary and converts it to
+    `failures > 0` + `complete = False` so the §L2 gate degrades the run to
+    `partial` instead of crashing.
+    """
+
+
 class SackmannStalenessError(IngestionError):
     """Local Sackmann mirror is older than `max_staleness_days`.
 

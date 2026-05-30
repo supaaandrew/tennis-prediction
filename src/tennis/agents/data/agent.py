@@ -28,7 +28,12 @@ import yaml
 from tennis.core import ids
 from tennis.core.clock import Clock
 from tennis.core.config import AppConfig
-from tennis.core.contracts import AgentContext, AgentError, AgentResult
+from tennis.core.contracts import (
+    AgentContext,
+    AgentError,
+    AgentResult,
+    ScraperAdapter,
+)
 from tennis.core.errors import SackmannStalenessError
 from tennis.core.lineage import AgentLineage, HeartbeatPolicy
 from tennis.core.logging import get_logger, redact_text
@@ -36,7 +41,6 @@ from tennis.storage.postgres.repositories import VenueRepository
 from tennis.storage.postgres.rows import VenueRow
 
 if TYPE_CHECKING:
-    from tennis.adapters.atp_scraper.adapter import AtpScraperAdapter
     from tennis.adapters.odds.adapter import OddsApiAdapter
     from tennis.adapters.owm.adapter import OWMAdapter
     from tennis.adapters.sackmann.adapter import SackmannAdapter
@@ -60,7 +64,10 @@ def _safe_cause(exc: BaseException) -> str:
 # wired adapter. Construction is deferred to run() so the single `as_of` (via the
 # pinned clock) and `run_id` thread into every adapter without import-time clients.
 SackmannFactory = Callable[[Clock, UUID], "SackmannAdapter"]
-ScraperFactory = Callable[[Clock, UUID], "AtpScraperAdapter"]
+# §T1: the scraper slot is now the abstract `ScraperAdapter` Protocol.
+# `AtpScraperAdapter` (deprecated) and `MatchstatScraperAdapter` both satisfy
+# it structurally — DataAgent never sees the concrete class, only `.fetch()`.
+ScraperFactory = Callable[[Clock, UUID], ScraperAdapter]
 OddsFactory = Callable[[Clock, UUID], "OddsApiAdapter"]
 OwmFactory = Callable[[Clock, UUID], "OWMAdapter"]
 

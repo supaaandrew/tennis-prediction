@@ -116,6 +116,22 @@ sources:
     coverage_start_year: 2020           # H11: odds data begins ~2020
     match_linkage_window_days: 1        # J1: window for player+date match lookup
 
+  matchstat:
+    # §T1 — canonical daily slate source (replaces the Cloudflare-blocked
+    # atp_scraper). Free tier: 500 req/month, 100 req/min per-IP throttle.
+    enabled: true
+    api_key_env: MATCHSTAT_API_KEY      # required for the DAILY chain (training optional, §T1)
+    host: "tennis-api-atp-wta-itf.p.rapidapi.com"   # §T9 — X-RapidAPI-Host header
+    base_url: "https://tennis-api-atp-wta-itf.p.rapidapi.com"
+    monthly_quota: 500                  # §T6 hard cap → MatchstatQuotaExhaustedError
+    quota_warn_at: 400                  # §T6 pre-trigger structured warning
+    per_minute_throttle: 100            # documented throttle; honored by rate_limit_rps
+    rate_limit_rps: 1.0
+    request_timeout_s: 30
+    lookforward_days: 2                 # matches OddsAdapter forecast horizon
+    tier_ids: [1, 2, 3, 4]              # §T5: 1=GS, 2=Masters1000, 3=ATP500, 4=ATP250
+    lookup_refresh_days: 7              # §T6 cache TTL for courts/rounds/ranks/countries/calendar
+
 # ---------------------------------------------------------------------------
 # Ingestion behavior (Data Agent)
 # ---------------------------------------------------------------------------

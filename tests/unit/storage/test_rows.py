@@ -141,6 +141,24 @@ class TestConstruction:
         assert m.retired is False
         assert m.intraday_conflict is False
         assert m.match_date_source is None
+        # §T10 — matchstat_id defaults to None on pre-matchstat rows.
+        assert m.matchstat_id is None
+
+    def test_match_row_matchstat_id_populated(self) -> None:
+        """§T10 — `matchstat_id` rides on every matchstat-written row."""
+        m = MatchRow(
+            match_id=1, tournament_id=10, round="R32",
+            match_date=date(2026, 5, 30), p1_id=100, p2_id=200,
+            status="scheduled", source="matchstat", source_uid="matchstat:42",
+            matchstat_id=42,
+        )
+        assert m.matchstat_id == 42
+        # Identity preserved through dataclasses.replace.
+        from dataclasses import replace
+
+        m2 = replace(m, status="live")
+        assert m2.matchstat_id == 42
+        assert m2 != m
 
     def test_match_stat_row(self) -> None:
         s = MatchStatRow(match_id=1, player_id=100, is_winner=True)

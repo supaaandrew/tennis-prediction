@@ -135,11 +135,18 @@ class MatchRepository(Protocol):
         start_ts: datetime | None,
         status: str,
         match_date_source: str,
+        matchstat_id: int | None = None,
     ) -> None:
         """Update ONLY the scraper-owned fields (`start_ts`, `status`,
-        `match_date_source`) on an existing row, used by the ATP scraper's
-        §K1 reconciliation path. No-op if `match_id` doesn't exist — log a
-        warning, never raise."""
+        `match_date_source`, optional sidecar `matchstat_id`) on an existing
+        row, used by the ATP scraper's §K1 reconciliation path. No-op if
+        `match_id` doesn't exist — log a warning, never raise.
+
+        §T10 (Codex finding 1) — `matchstat_id` is NULL-safe: a `None` value
+        preserves whatever was there before (mirrors the upsert COALESCE
+        semantics so a non-matchstat writer can never clobber a matchstat-
+        written id). The matchstat adapter passes `fx.matchstat_id`; the ATP
+        scraper passes the default `None` and the column stays as-is."""
         ...
 
     def find_by_players_and_date(

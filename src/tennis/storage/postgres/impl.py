@@ -486,6 +486,14 @@ class MatchRepositoryImpl:
                     "walkover": stmt.excluded.walkover,
                     "status": stmt.excluded.status,
                     "match_date_source": stmt.excluded.match_date_source,
+                    # §T10 — matchstat_id is sidecar metadata, not identity.
+                    # COALESCE so the matchstat adapter can fill it in on a
+                    # conflict (e.g. Sackmann wrote a final row first), and a
+                    # later non-matchstat write with NULL never clobbers a
+                    # previously-set value.
+                    "matchstat_id": func.coalesce(
+                        stmt.excluded.matchstat_id, m.Match.matchstat_id
+                    ),
                     # NOT updated (identity / hash inputs, kept from first writer;
                     # all are necessarily identical on a match_id conflict):
                     #   source, source_uid, match_date, tournament_id, round,
@@ -504,12 +512,18 @@ class MatchRepositoryImpl:
         start_ts: datetime | None,
         status: str,
         match_date_source: str,
+        matchstat_id: int | None = None,
     ) -> None:
         """Update only the scraper-owned fields on an existing row (K1).
 
         No-op when `match_id` doesn't exist — logs a warning and returns
         rather than raising, so the scraper's reconciliation path can fall
         through to a full upsert without special-casing the race.
+
+        §T10 (Codex finding 1) — `matchstat_id` is NULL-safe: a `None` value
+        preserves the existing column value (mirrors the upsert COALESCE
+        semantics). The matchstat adapter passes `fx.matchstat_id`; pre-
+        matchstat callers leave it `None` and the column is untouched.
         """
         if start_ts is not None:
             _require_tz_aware(start_ts, "start_ts")
@@ -521,6 +535,8 @@ class MatchRepositoryImpl:
             o.start_ts = start_ts
             o.status = status
             o.match_date_source = match_date_source
+            if matchstat_id is not None:
+                o.matchstat_id = matchstat_id
             s.flush()
 
     def for_training(
