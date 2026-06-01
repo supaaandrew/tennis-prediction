@@ -1296,3 +1296,67 @@ fixture-capture script (`scripts/capture_matchstat_fixtures.py`) to replace synt
 deployment work: training backfill, Task Scheduler register, subscribe to matchstat + add key
 to .env. **Pre-commit operator action:** rotate the leaked `ANTHROPIC_API_KEY` at
 console.anthropic.com.
+
+## Session 2026-05-30 — §T-2 wire four matchstat sidecar consumers + first real daily run prep
+**Prompt:** Implement §T-2 per `spec.md`: wire the four matchstat sidecars (built in §T but with
+no consumer) into `SackmannResolver` (§T11), `DataAgent` (§T12 calendar + §T13 rankings + §T5
+startup tier-id canary), and `H2HExtractor` (§T14 6 clutch keys); fold §T6 quota into the §Q6
+Monitor envelope; ship the live-API fixture-capture script; do NOT change §T-built code.
+**Shipped:** 1293→1321 unit tests (+28). New file: `scripts/capture_matchstat_fixtures.py`
+(operator one-shot httpx-direct, reads `MATCHSTAT_API_KEY` from `os.environ` via `Import-DotEnv`,
+no `python-dotenv` dep). Surfaces touched: `adapters/sackmann/resolver.py` (§T15 optional
+`search_enricher` ctor; Tier-2-miss-AND-`ref.dob=None` trigger; §H6 alias write via existing
+`_upsert_alias`); `agents/data/agent.py` (§T16 calendar layered INSIDE `_step_geocode_venues`
+BEFORE the §L11 YAML pass; §T17 rankings between odds and OWM with ISO-week-Monday anchor;
+§T19 `pre_fetch_check` at top of `_step_scraper` with distinct `matchstat_tier_mismatch`
+AgentError code); `agents/research/features/h2h.py` (§T18 13-key family + EXTRACTOR-SIDE response
+swap when caller's `p1_id > p2_id` to undo the sidecar's URL-side sort); `agents/research/specs.py`
+(`"h2h"` extended to 13 rows at v1, additive, no version bump); `agents/research/agent.py`
+(§T18 `h2h_stats_client` ctor arg threaded through `_ExtractorDeps`); `adapters/matchstat/client.py`
+(§T19 `verify_tier_ids()` reads `list_ranks()` from the §T6 7-day cache, raises new typed
+`MatchstatTierMismatchError(ConfigError)`; new public `monthly_quota` property closing the §T6
+`_cfg` leak); `adapters/matchstat/parser.py` (`_EXPECTED_TIER_NAMES` exported); `core/errors.py`
+(`MatchstatTierMismatchError`); `agents/monitor/agent.py` (§T20 optional `matchstat_client`;
+best-effort `matchstat.{quota_remaining, monthly_quota}` sub-dict; `_metrics_envelope` promoted
+from `@staticmethod` to instance method); `composition.py` (all four consumers gated on
+`self._matchstat_api_key is not None`; training chains skip cleanly per §S6a). Tests +28: 4
+resolver, 11 DataAgent, 5 H2HExtractor (incl. both-direction transpose tests), 1 specs (+
+`family_feature_keys("h2h")` assertion), 4 matchstat client (3 verify_tier_ids + 1 monthly_quota),
+3 monitor, 2 composition.
+**Codex findings:** Auto-review (RUN REVIEW) — **0 CRITICAL**; H3 wrong error code (operator
+can't distinguish tier mismatch from scraper failure) → added specific `MatchstatTierMismatchError`
+clause BEFORE generic `except Exception` in `_step_scraper`; M2 missing `family_feature_keys("h2h")`
+assertion → added; M5 rankings ordering test checked metrics not call order → extended to assert
+call-list order; M6 `python-dotenv` not in `pyproject.toml` → script now reads `os.environ` directly
+with operator instruction to run `Import-DotEnv` first. Adversarial `/codex:adversarial-review`
+**0 CRITICAL / 1 HIGH / 2 MEDIUM**. **HIGH F1** — VALID + FIXED: `MatchstatH2hStatsClient.fetch`
+issues the URL in SORTED `(min, max)` order so matchstat's `player1Stats` is always the
+lower-id player — when caller's `p1_id > p2_id` the naive pass-through I'd built would silently
+transpose all 6 §T14 clutch features. Fix is at the EXTRACTOR (the §T-2 spec locked
+"§T-built code does not change this session"); two regression tests pin both directions.
+**MEDIUM F2** — PARTIALLY VALID, DOCUMENTED in §T16/§T17 as accepted v1 design: the
+degrade-safe `try/except Exception` on the calendar + rankings steps catches programmer bugs
+too (only `*_failures=1` in metrics, no `AgentError`); the §T-2 spec EXPLICITLY locked this
+("any exception is caught as a structured WARNING; no AgentError"). Type-name + redacted cause
+land in the log via `_safe_cause`; failure counter exposed in §Q6 envelope; v2 carry-forward
+is a warn/alert classifier. **MEDIUM F3** — PARTIALLY VALID, DOCUMENTED in §T15 as accepted v1
+design: enrichment only fires when `ref.dob is None`; the spec locked this trigger; widening
+to "ref.dob present but Tier-2 misses" would burn §T6 quota on every Sackmann-DOB-present ref
+AND risk locking onto wrong-country hits; v2 carry-forward with a quota-budget knob.
+**New locked decisions:** **§T15–§T20** in the §M decision table. §T15 resolver enrichment
+hook with the locked trigger condition + F3 carry-forward; §T16 calendar pass with the locked
+F2 degrade-safe boundary; §T17 rankings seed with the same F2 boundary; §T18 H2H clutch
+extension WITH the F1 extractor-side swap lock; §T19 startup TourRank canary with
+`MatchstatTierMismatchError(ConfigError)` + distinct AgentError code; §T20 Monitor `matchstat`
+envelope sub-dict with both-or-neither pure-read semantics.
+**Next:** **First real daily run + training backfill** (operator-led, NOT a code session).
+Operator subscribes to matchstat at RapidAPI `tennis-api-atp-wta-itf`, appends `MATCHSTAT_API_KEY`
+to `.env`, runs `ops/run_train.ps1` for the multi-hour resumable training backfill, registers the
+Task Scheduler job (`ops/tennis-run.xml`, 06:30 UTC), then runs `ops/run_daily.ps1` — definition
+of done = 5 `pipeline_runs` rows under one `run_id` (4×`succeeded` + Monitor `succeeded|partial`)
+with `metrics->'matchstat'->>'quota_remaining'` visible, non-empty `predictions` write, briefing
+email delivered. The next CODE session is **§M11 date-EXACT tightening** — promote
+`PlayerRankingRepository.latest_before` from date-granular `≤` to timestamp-strict `<` (needs a
+`published_at` column on `player_rankings`, migration 015) now that §T13's rankings refresh is
+populating fresh data with date precision. **Pre-commit operator action carried forward
+unchanged:** rotate the previously-committed `ANTHROPIC_API_KEY` at `console.anthropic.com`.

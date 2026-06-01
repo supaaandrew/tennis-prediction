@@ -47,9 +47,11 @@ from tennis.adapters.matchstat.models import (
 from tennis.core.clock import Clock
 from tennis.core.config import MatchstatSource
 from tennis.core.contracts import HttpClient
+from tennis.adapters.matchstat.parser import _EXPECTED_TIER_NAMES
 from tennis.core.errors import (
     MatchstatAuthError,
     MatchstatQuotaExhaustedError,
+    MatchstatTierMismatchError,
     RateLimitError,
     UpstreamUnavailableError,
 )
@@ -409,6 +411,32 @@ class MatchstatClient:
         if self._quota_month != current_month:
             return self._cfg.monthly_quota
         return max(0, self._cfg.monthly_quota - self._quota_count)
+
+    @property
+    def monthly_quota(self) -> int:
+        """The configured monthly hard cap (§T6). Exposed publicly so the
+        §Q Monitor envelope doesn't reach through `_cfg`."""
+        return int(self._cfg.monthly_quota)
+
+    def verify_tier_ids(self) -> None:
+        """§T5 startup canary — assert each configured `tier_id` still maps
+        to a known tier name in the live `/ranks` lookup.
+
+        Reads via `list_ranks()` which is backed by the §T6 lookup cache —
+        warm cache → 0 quota; cold → 1 quota request per `lookup_refresh_days`.
+        Raises `MatchstatTierMismatchError` on the first divergence so the
+        DataAgent §L2 gate drops Data to `partial`. A configured id missing
+        entirely from the live response (`None`) is also a mismatch.
+        """
+        ranks = self.list_ranks()
+        id_to_name: dict[int, str | None] = {r.id: r.name for r in ranks}
+        for tier_id in self._cfg.tier_ids:
+            name = id_to_name.get(int(tier_id))
+            if name is None or name not in _EXPECTED_TIER_NAMES:
+                raise MatchstatTierMismatchError(
+                    f"matchstat tier id {tier_id} maps to {name!r}, "
+                    f"expected one of {sorted(_EXPECTED_TIER_NAMES)}"
+                )
 
     def _upsert_watermark(self, *, scope: str, cursor: dict[str, Any]) -> None:
         try:

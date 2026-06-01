@@ -30,7 +30,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tennis.core.config import AppConfig
 from tennis.core.logging import get_logger
@@ -42,6 +42,9 @@ from tennis.agents.research.context import (
     match_instant,
 )
 
+if TYPE_CHECKING:
+    from tennis.adapters.matchstat.sidecars import MatchstatH2hStatsClient
+
 _logger = get_logger("tennis.agents.research.features.h2h")
 
 # Family name (metrics key in R6); the seeded `feature_specs` rows live in specs.py.
@@ -51,8 +54,10 @@ H2H_FAMILY = "h2h"
 _DAYS_PER_YEAR = 365.25
 _SECONDS_PER_YEAR = _DAYS_PER_YEAR * 86400.0
 
-# The 7 keys this family emits (§15.5 `features.h2h`). Must stay in lockstep with
-# the `"h2h"` rows seeded by specs.py — guarded by the round-trip test (§M7).
+# The 13 keys this family emits (§15.5 `features.h2h` + §T14 clutch). Must stay
+# in lockstep with the `"h2h"` rows seeded by specs.py — guarded by the
+# round-trip test (§M7). The 6 trailing clutch keys are §T14: NULL whenever
+# `h2h_stats_client` is None or matchstat returns no usable stats (C14).
 H2H_FEATURE_KEYS: tuple[str, ...] = (
     "h2h_matches",
     "h2h_p1_wins",
@@ -61,7 +66,24 @@ H2H_FEATURE_KEYS: tuple[str, ...] = (
     "h2h_surface_p1_win_rate",
     "h2h_win_rate_confidence",
     "h2h_win_rate_weighted",
+    # §T14 — matchstat-precomputed clutch fields.
+    "p1_h2h_deciding_set_wins",
+    "p2_h2h_deciding_set_wins",
+    "p1_h2h_tiebreak_wins",
+    "p2_h2h_tiebreak_wins",
+    "p1_h2h_comeback_wins",
+    "p2_h2h_comeback_wins",
 )
+
+# §T14 — keys emitted as NULL when matchstat is missing / `matchesCount == 0`.
+_T14_NULL_KEYS: dict[str, None] = {
+    "p1_h2h_deciding_set_wins": None,
+    "p2_h2h_deciding_set_wins": None,
+    "p1_h2h_tiebreak_wins": None,
+    "p2_h2h_tiebreak_wins": None,
+    "p1_h2h_comeback_wins": None,
+    "p2_h2h_comeback_wins": None,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +157,7 @@ class H2HExtractor:
         history: MatchHistoryIndex,
         tournament_repo: TournamentRepository,
         config: AppConfig,
+        h2h_stats_client: "MatchstatH2hStatsClient | None" = None,
     ) -> None:
         self._history = history
         self._tournament_repo = tournament_repo
@@ -144,6 +167,11 @@ class H2HExtractor:
         fe = config.feature_engineering
         self._retirement_counts = fe.retirement_counts_as_match
         self._walkover_counts = fe.walkover_counts_as_match
+        # §T14 — optional matchstat clutch-stats client. When None, the 6 §T14
+        # keys all emit NULL (C14). When set, the sidecar caches per-pair
+        # across the run and absorbs quota / matchesCount==0 / parse errors
+        # as None so the extractor itself never sees adapter exceptions.
+        self._h2h_stats = h2h_stats_client
 
     def feature_keys(self) -> tuple[str, ...]:
         return H2H_FEATURE_KEYS
@@ -173,6 +201,43 @@ class H2HExtractor:
         surface_n = len(surface_meetings)
         surface_p1_wins = sum(1 for m in surface_meetings if m.winner_id == p1)
 
+        # §T14 — matchstat clutch H2H mapping. The sidecar
+        # `MatchstatH2hStatsClient.fetch` ALWAYS issues the HTTP request in
+        # SORTED `(min, max)` order (it normalizes both the cache key AND the
+        # URL path), so matchstat's `player1Stats` always corresponds to the
+        # LOWER player id. Our local `p1` is the caller's match perspective,
+        # which is NOT guaranteed to be the lower id. When `p1 > p2`, the
+        # response sides must be swapped before mapping to our `p{1,2}_h2h_*`
+        # keys — otherwise all 6 §T14 features silently transpose for every
+        # match whose first-listed player has the higher canonical id
+        # (Codex §T-2 review F1).
+        # A None client (training / no key) or a None hit (quota /
+        # matchesCount==0 / transport fail) emits all 6 keys as NULL per C14.
+        # The field-name mapping is pinned by a regression test that fails
+        # loud on an upstream rename.
+        clutch = dict(_T14_NULL_KEYS)
+        if self._h2h_stats is not None:
+            stats = self._h2h_stats.fetch(p1_id=p1, p2_id=p2)
+            if stats is not None:
+                # `lower_stats` = response side for min(p1, p2) (matchstat's
+                # `player1Stats`); `higher_stats` = response side for max
+                # (matchstat's `player2Stats`).
+                lower_stats = stats.player1Stats
+                higher_stats = stats.player2Stats
+                # Map back to our caller perspective.
+                if p1 <= p2:
+                    p1_stats, p2_stats = lower_stats, higher_stats
+                else:
+                    p1_stats, p2_stats = higher_stats, lower_stats
+                if p1_stats is not None:
+                    clutch["p1_h2h_deciding_set_wins"] = p1_stats.decidingSetWin
+                    clutch["p1_h2h_tiebreak_wins"] = p1_stats.tiebreakWon
+                    clutch["p1_h2h_comeback_wins"] = p1_stats.firstSetLoseMatchWin
+                if p2_stats is not None:
+                    clutch["p2_h2h_deciding_set_wins"] = p2_stats.decidingSetWin
+                    clutch["p2_h2h_tiebreak_wins"] = p2_stats.tiebreakWon
+                    clutch["p2_h2h_comeback_wins"] = p2_stats.firstSetLoseMatchWin
+
         return {
             "h2h_matches": n,
             "h2h_p1_wins": p1_wins,
@@ -191,6 +256,7 @@ class H2HExtractor:
                 if n > 0
                 else None
             ),
+            **clutch,
         }
 
     def _surface_of(self, match: MatchRow) -> Surface | None:

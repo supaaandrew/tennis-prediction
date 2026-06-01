@@ -339,3 +339,168 @@ class TestH2HAdvanced:
         ]
         out = _extractor(meetings, config).extract(_fctx(_current(), _AS_OF))
         assert out["h2h_win_rate_weighted"] == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# §T14 — matchstat clutch H2H pass-through
+# ---------------------------------------------------------------------------
+from types import SimpleNamespace  # noqa: E402 — local-only
+
+
+class _FakeH2hStatsClient:
+    """Records (p1_id, p2_id) and returns a programmable MsH2hStats stand-in
+    (SimpleNamespace duck-typing the .player{1,2}Stats fields the extractor
+    reads). `None` simulates the absorbed-failure / matchesCount==0 path."""
+
+    def __init__(self, stats: SimpleNamespace | None) -> None:
+        self._stats = stats
+        self.calls: list[tuple[int, int]] = []
+
+    def fetch(self, *, p1_id: int, p2_id: int) -> SimpleNamespace | None:
+        self.calls.append((p1_id, p2_id))
+        return self._stats
+
+
+def _ms_stats(
+    p1: tuple[int | None, int | None, int | None],
+    p2: tuple[int | None, int | None, int | None],
+) -> SimpleNamespace:
+    """Build a stand-in `MsH2hStats` from `(decidingSetWin, tiebreakWon,
+    firstSetLoseMatchWin)` tuples per side."""
+    return SimpleNamespace(
+        player1Stats=SimpleNamespace(
+            decidingSetWin=p1[0], tiebreakWon=p1[1], firstSetLoseMatchWin=p1[2],
+        ),
+        player2Stats=SimpleNamespace(
+            decidingSetWin=p2[0], tiebreakWon=p2[1], firstSetLoseMatchWin=p2[2],
+        ),
+    )
+
+
+def _extractor_with_h2h(
+    meetings: list[MatchRow], config: AppConfig,
+    h2h_stats_client: _FakeH2hStatsClient | None,
+    repo: _FakeTournamentRepo | None = None,
+) -> H2HExtractor:
+    return H2HExtractor(
+        history=MatchHistoryIndex.build(meetings),
+        tournament_repo=repo or _repo(),
+        config=config,
+        h2h_stats_client=h2h_stats_client,
+    )
+
+
+class TestT14H2HClutchPassThrough:
+    def test_pinned_field_name_mapping_fails_loud_on_upstream_rename(
+        self, config: AppConfig
+    ) -> None:
+        """A regression test against an API rename of `decidingSetWin` /
+        `tiebreakWon` / `firstSetLoseMatchWin`. The map is verbatim and
+        per-side; failing assertions here mean the mapping has drifted."""
+        client = _FakeH2hStatsClient(
+            stats=_ms_stats(p1=(3, 5, 2), p2=(1, 4, 7))
+        )
+        out = _extractor_with_h2h([], config, client).extract(
+            _fctx(_current(p1=10, p2=20), _AS_OF)
+        )
+        assert client.calls == [(10, 20)]  # local p1/p2 order passed through
+        # Per-side verbatim mapping (NEVER swap sides; sidecar normalizes only
+        # the cache KEY, not the URL/response order).
+        assert out["p1_h2h_deciding_set_wins"] == 3
+        assert out["p1_h2h_tiebreak_wins"] == 5
+        assert out["p1_h2h_comeback_wins"] == 2
+        assert out["p2_h2h_deciding_set_wins"] == 1
+        assert out["p2_h2h_tiebreak_wins"] == 4
+        assert out["p2_h2h_comeback_wins"] == 7
+
+    def test_none_client_emits_six_nulls_base_keys_unaffected(
+        self, config: AppConfig
+    ) -> None:
+        """Training without a key (`h2h_stats_client=None`) — the 6 §T14
+        keys are NULL (C14) but the 7 base h2h keys still emit normally."""
+        out = _extractor_with_h2h(
+            [_meeting(1, winner=1), _meeting(2, winner=2)], config, None,
+        ).extract(_fctx(_current(), _AS_OF))
+        # Base h2h unchanged.
+        assert out["h2h_matches"] == 2
+        assert out["h2h_p1_wins"] == 1
+        assert out["h2h_p1_win_rate"] == 0.5
+        # §T14 NULL.
+        for k in (
+            "p1_h2h_deciding_set_wins", "p2_h2h_deciding_set_wins",
+            "p1_h2h_tiebreak_wins", "p2_h2h_tiebreak_wins",
+            "p1_h2h_comeback_wins", "p2_h2h_comeback_wins",
+        ):
+            assert out[k] is None
+
+    def test_none_hit_emits_six_nulls(self, config: AppConfig) -> None:
+        """A None hit (matchesCount==0 / quota / parse error — all absorbed
+        in the sidecar) emits all 6 §T14 keys as NULL, base keys unchanged."""
+        client = _FakeH2hStatsClient(stats=None)  # absorbed-failure path
+        out = _extractor_with_h2h(
+            [_meeting(1, winner=1)], config, client,
+        ).extract(_fctx(_current(), _AS_OF))
+        assert client.calls == [(1, 2)]
+        assert out["h2h_matches"] == 1
+        for k in (
+            "p1_h2h_deciding_set_wins", "p2_h2h_deciding_set_wins",
+            "p1_h2h_tiebreak_wins", "p2_h2h_tiebreak_wins",
+            "p1_h2h_comeback_wins", "p2_h2h_comeback_wins",
+        ):
+            assert out[k] is None
+
+    def test_feature_keys_count_is_thirteen(self, config: AppConfig) -> None:
+        """§T14 lock: H2H_FEATURE_KEYS = 7 base + 6 clutch = 13."""
+        assert len(H2H_FEATURE_KEYS) == 13
+        ex = _extractor_with_h2h([], config, None)
+        assert len(ex.feature_keys()) == 13
+
+    def test_p1_higher_id_does_not_transpose_clutch_keys(
+        self, config: AppConfig
+    ) -> None:
+        """Codex §T-2 review F1 regression — `MatchstatH2hStatsClient.fetch`
+        ALWAYS issues the HTTP request in SORTED `(min, max)` order, so
+        matchstat's `player1Stats` always corresponds to the LOWER id.
+
+        When the caller's local `p1_id > p2_id`, naive pass-through would
+        silently transpose all 6 §T14 features. This test pins the
+        extractor-side swap: regardless of input id order, our `p1_*` keys
+        always carry the perspective of the caller's `p1`."""
+        # Synthesized payload: matchstat returns the LOWER-id player's
+        # numbers under player1Stats. Use distinctive values to detect a swap.
+        # The "lower id" stats (deciding=3, tiebreak=5, comeback=2) should
+        # land under p2_h2h_* (because caller's p1_id=20 > p2_id=10, so the
+        # lower id is p2).
+        client = _FakeH2hStatsClient(
+            stats=_ms_stats(p1=(3, 5, 2), p2=(1, 4, 7)),  # min-id, max-id
+        )
+        out = _extractor_with_h2h([], config, client).extract(
+            _fctx(_current(p1=20, p2=10), _AS_OF)
+        )
+        # Sidecar receives the caller's order (it does its own sorting).
+        assert client.calls == [(20, 10)]
+        # Caller's p1 (id=20) is the HIGHER id, so it maps to matchstat's
+        # player2Stats (1, 4, 7), NOT the player1Stats (3, 5, 2).
+        assert out["p1_h2h_deciding_set_wins"] == 1
+        assert out["p1_h2h_tiebreak_wins"] == 4
+        assert out["p1_h2h_comeback_wins"] == 7
+        # Caller's p2 (id=10) is the LOWER id, so it maps to player1Stats.
+        assert out["p2_h2h_deciding_set_wins"] == 3
+        assert out["p2_h2h_tiebreak_wins"] == 5
+        assert out["p2_h2h_comeback_wins"] == 2
+
+    def test_p1_lower_id_preserves_pass_through(self, config: AppConfig) -> None:
+        """When the caller's `p1_id < p2_id`, the extractor's swap is a
+        no-op — matchstat's player1Stats is the lower id which is also
+        our p1, so pass-through is preserved. Pairs with the higher-id
+        test above to assert both directions are correct."""
+        client = _FakeH2hStatsClient(
+            stats=_ms_stats(p1=(3, 5, 2), p2=(1, 4, 7)),
+        )
+        out = _extractor_with_h2h([], config, client).extract(
+            _fctx(_current(p1=10, p2=20), _AS_OF)
+        )
+        assert client.calls == [(10, 20)]
+        # p1 (id=10) is the LOWER id → player1Stats.
+        assert out["p1_h2h_deciding_set_wins"] == 3
+        assert out["p2_h2h_deciding_set_wins"] == 1

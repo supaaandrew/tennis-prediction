@@ -23,6 +23,7 @@ from tennis.core.config import MatchstatSource
 from tennis.core.errors import (
     MatchstatAuthError,
     MatchstatQuotaExhaustedError,
+    MatchstatTierMismatchError,
     RateLimitError,
     UpstreamUnavailableError,
 )
@@ -322,3 +323,102 @@ class TestT6LookupCache:
         client, _ = _make_client(handler=handler, watermarks=wm)
         courts = client.list_courts()
         assert courts[0].name == "Fresh"
+
+
+# ---------------------------------------------------------------------------
+# §T5 startup TourRank-id canary
+# ---------------------------------------------------------------------------
+class TestT5VerifyTierIds:
+    """`verify_tier_ids` reads the §T6 lookup cache and fails loud on
+    upstream renumbering. Warm-cache path costs 0 quota."""
+
+    def _seed_ranks(
+        self,
+        wm: _FakeWatermarks,
+        rows: list[dict[str, Any]],
+        *,
+        fetched_at: datetime = datetime(2026, 5, 30, 6, 0, tzinfo=UTC),
+    ) -> None:
+        wm.store[("matchstat", "lookup:ranks")] = IngestWatermarkRow(
+            source="matchstat",
+            scope="lookup:ranks",
+            last_processed_at=fetched_at,
+            cursor={"fetched_at": fetched_at.isoformat(), "data": rows},
+        )
+
+    def test_matching_tier_ids_pass_silently(self) -> None:
+        """All four configured ids map to a known tier name → no raise,
+        no extra HTTP (lookup cache is warm)."""
+        wm = _FakeWatermarks()
+        self._seed_ranks(wm, [
+            {"id": 1, "name": "Grand Slam"},
+            {"id": 2, "name": "Masters 1000"},
+            {"id": 3, "name": "ATP 500"},
+            {"id": 4, "name": "ATP 250"},
+            {"id": 5, "name": "Challenger"},  # configured ids ignore extras
+        ])
+        call_count = [0]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            call_count[0] += 1
+            return httpx.Response(500)  # would explode if hit
+
+        clock = FrozenClock(datetime(2026, 6, 1, tzinfo=UTC))  # within 7d
+        client, _ = _make_client(handler=handler, watermarks=wm, clock=clock)
+        client.verify_tier_ids()  # must not raise
+        assert call_count[0] == 0  # warm-cache: zero HTTP
+
+    def test_renumbered_tier_raises_typed_error(self) -> None:
+        """If matchstat ever renumbers (id 2 returns a name we don't know),
+        raise `MatchstatTierMismatchError` listing the offending id + name."""
+        wm = _FakeWatermarks()
+        self._seed_ranks(wm, [
+            {"id": 1, "name": "Grand Slam"},
+            {"id": 2, "name": "Renamed Tier"},  # divergence!
+            {"id": 3, "name": "ATP 500"},
+            {"id": 4, "name": "ATP 250"},
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)  # cache hit; should not fire
+
+        clock = FrozenClock(datetime(2026, 6, 1, tzinfo=UTC))
+        client, _ = _make_client(handler=handler, watermarks=wm, clock=clock)
+        with pytest.raises(MatchstatTierMismatchError) as exc_info:
+            client.verify_tier_ids()
+        msg = str(exc_info.value)
+        assert "tier id 2" in msg
+        assert "Renamed Tier" in msg
+
+    def test_missing_tier_id_in_response_raises_typed_error(self) -> None:
+        """A configured id that the live lookup doesn't expose at all is
+        also a renumbering signal — fail loud (no silent acceptance)."""
+        wm = _FakeWatermarks()
+        # Tier 4 (ATP 250) is missing — `id_to_name.get(4)` returns None.
+        self._seed_ranks(wm, [
+            {"id": 1, "name": "Grand Slam"},
+            {"id": 2, "name": "Masters 1000"},
+            {"id": 3, "name": "ATP 500"},
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)
+
+        clock = FrozenClock(datetime(2026, 6, 1, tzinfo=UTC))
+        client, _ = _make_client(handler=handler, watermarks=wm, clock=clock)
+        with pytest.raises(MatchstatTierMismatchError) as exc_info:
+            client.verify_tier_ids()
+        assert "tier id 4" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# §T6 public monthly_quota accessor (Codex finding K leak fix)
+# ---------------------------------------------------------------------------
+class TestMonthlyQuotaAccessor:
+    def test_monthly_quota_property_matches_config(self) -> None:
+        cfg = _config(monthly_quota=500)
+        client, _ = _make_client(
+            handler=lambda r: httpx.Response(200, json={}),
+            config=cfg,
+        )
+        assert client.monthly_quota == 500

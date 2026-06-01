@@ -90,6 +90,15 @@ _REGISTRY: dict[str, tuple[FeatureSpecRow, ...]] = {
         FeatureSpecRow("h2h_surface_p1_win_rate", 1, "float"),
         FeatureSpecRow("h2h_win_rate_confidence", 1, "float"),
         FeatureSpecRow("h2h_win_rate_weighted", 1, "float"),
+        # §T14 — matchstat clutch H2H. All non-critical (§M8); each is a small
+        # whole number (count of meetings). NULL when matchstat is missing or
+        # returns matchesCount==0.
+        FeatureSpecRow("p1_h2h_deciding_set_wins", 1, "int"),
+        FeatureSpecRow("p2_h2h_deciding_set_wins", 1, "int"),
+        FeatureSpecRow("p1_h2h_tiebreak_wins", 1, "int"),
+        FeatureSpecRow("p2_h2h_tiebreak_wins", 1, "int"),
+        FeatureSpecRow("p1_h2h_comeback_wins", 1, "int"),
+        FeatureSpecRow("p2_h2h_comeback_wins", 1, "int"),
     ),
     "surface": (
         FeatureSpecRow("p1_career_win_rate_surface", 1, "float"),

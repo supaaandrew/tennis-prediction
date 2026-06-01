@@ -15,6 +15,7 @@ import pytest
 from tennis.agents.research.specs import (
     _REGISTRY,
     build_expected_specs,
+    family_feature_keys,
     seed_feature_specs,
 )
 from tennis.agents.research.validator import _CRITICAL_FEATURE_KEYS, FeatureSpec
@@ -236,6 +237,9 @@ class TestProductionRegistry:
             "p1_rank_stale",
             "p2_rank_stale",
         }
+        # §T14 — h2h registry extended to 13 keys (7 base + 6 clutch). No
+        # version bump on the existing 7 (registry is family-name-keyed; new
+        # keys at v1 coexist).
         assert {row.feature_key for row in _REGISTRY["h2h"]} == {
             "h2h_matches",
             "h2h_p1_wins",
@@ -244,7 +248,45 @@ class TestProductionRegistry:
             "h2h_surface_p1_win_rate",
             "h2h_win_rate_confidence",
             "h2h_win_rate_weighted",
+            "p1_h2h_deciding_set_wins",
+            "p2_h2h_deciding_set_wins",
+            "p1_h2h_tiebreak_wins",
+            "p2_h2h_tiebreak_wins",
+            "p1_h2h_comeback_wins",
+            "p2_h2h_comeback_wins",
         }
+        assert len(_REGISTRY["h2h"]) == 13
+        # §T14 clutch keys are int counts at version 1.
+        clutch_by_key = {row.feature_key: row for row in _REGISTRY["h2h"]}
+        for k in (
+            "p1_h2h_deciding_set_wins",
+            "p2_h2h_deciding_set_wins",
+            "p1_h2h_tiebreak_wins",
+            "p2_h2h_tiebreak_wins",
+            "p1_h2h_comeback_wins",
+            "p2_h2h_comeback_wins",
+        ):
+            assert clutch_by_key[k].dtype == "int"
+            assert clutch_by_key[k].version == 1
+        # §T14 — the public family_feature_keys() helper sees all 13 keys.
+        # Drives the Modeling feature-set resolver's `family in/out` decisions
+        # (§M21a), so a missed clutch key here would silently exclude them
+        # from the model X.
+        assert family_feature_keys("h2h") == frozenset({
+            "h2h_matches",
+            "h2h_p1_wins",
+            "h2h_p1_win_rate",
+            "h2h_surface_matches",
+            "h2h_surface_p1_win_rate",
+            "h2h_win_rate_confidence",
+            "h2h_win_rate_weighted",
+            "p1_h2h_deciding_set_wins",
+            "p2_h2h_deciding_set_wins",
+            "p1_h2h_tiebreak_wins",
+            "p2_h2h_tiebreak_wins",
+            "p1_h2h_comeback_wins",
+            "p2_h2h_comeback_wins",
+        })
         # Form = 5 windows × (2 win_rate + 2 matches_played + 1 diff) = 25 rows.
         assert len(_REGISTRY["form"]) == 25
 

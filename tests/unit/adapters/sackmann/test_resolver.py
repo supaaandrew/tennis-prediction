@@ -228,3 +228,103 @@ def test_register_collision_does_not_overwrite_alias() -> None:
     assert aliases.store[("2", "sackmann")].player_id == 222
     # And the collision was logged.
     r._logger.warning.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# §T11 — matchstat search enrichment (DOB+country tier extension)
+# ---------------------------------------------------------------------------
+from types import SimpleNamespace  # noqa: E402 — local-only, after the existing tests
+
+
+class _FakeSearchEnricher:
+    """Records enrich() calls and returns a programmable hit (or None)."""
+
+    def __init__(self, hit: SimpleNamespace | None) -> None:
+        self._hit = hit
+        self.calls: list[str] = []
+
+    def enrich(self, *, name: str) -> SimpleNamespace | None:
+        self.calls.append(name)
+        return self._hit
+
+
+def _ms_hit(*, birthday: date | None, countryAcr: str | None) -> SimpleNamespace:
+    """A pydantic-shaped stand-in for `MsSearchResult` (only the two fields
+    the resolver consumes)."""
+    return SimpleNamespace(birthday=birthday, countryAcr=countryAcr)
+
+
+def test_t11_search_enrichment_locks_tier2_on_unique_dob_country_match() -> None:
+    """A matchstat hit whose DOB+country resolves to exactly ONE indexed
+    player locks the resolution at §C2 Tier 2 with `confidence='exact'`,
+    even though the inbound `ref.dob` is None (Sackmann gap)."""
+    players, aliases = FakePlayerRepo(), FakeAliasRepo()
+    enricher = _FakeSearchEnricher(
+        hit=_ms_hit(birthday=date(1986, 6, 3), countryAcr="ESP")
+    )
+    r = _resolver(players, aliases, search_enricher=enricher)
+    r.register(_player(222, "Rafael Nadal", "2",
+                       date_of_birth=date(1986, 6, 3), country_code="ESP"))
+
+    # Reference name doesn't tier-1, has no DOB (would short-circuit Tier 3).
+    pid = r.resolve(PlayerRef(name="R. Nadal", source="sackmann"))
+
+    assert pid == 222
+    assert enricher.calls == ["R. Nadal"]
+    alias = aliases.store[("r nadal", "sackmann")]
+    assert alias.confidence == "exact"
+    assert alias.dob == date(1986, 6, 3)
+    assert alias.country_code == "ESP"
+
+
+def test_t11_search_enrichment_dob_divergence_falls_through() -> None:
+    """A matchstat hit whose DOB+country does NOT match any registered
+    player (0 candidates) falls through without writing the enriched
+    alias — divergence signals the wrong player despite the name match.
+    The resolver then runs its usual remaining tiers; with no fuzzy match
+    and no atp_id the canonical failure (PlayerResolutionError) fires."""
+    players, aliases = FakePlayerRepo(), FakeAliasRepo()
+    enricher = _FakeSearchEnricher(
+        # Matchstat returns Federer-like DOB+country, divergent from Nadal.
+        hit=_ms_hit(birthday=date(1981, 8, 8), countryAcr="SUI")
+    )
+    r = _resolver(players, aliases, search_enricher=enricher)
+    r.register(_player(222, "Rafael Nadal", "2",
+                       date_of_birth=date(1986, 6, 3), country_code="ESP"))
+
+    with pytest.raises(PlayerResolutionError):
+        r.resolve(PlayerRef(name="R. Nadal", source="sackmann"))
+
+    # The enricher was consulted exactly once; its hit did NOT lock an alias
+    # under "exact" (no `("r nadal", "sackmann")` entry from the §T11 branch).
+    assert enricher.calls == ["R. Nadal"]
+    assert ("r nadal", "sackmann") not in aliases.store
+
+
+def test_t11_search_enricher_none_is_clean_noop() -> None:
+    """Training without `MATCHSTAT_API_KEY` -> `search_enricher=None`:
+    behavior is bit-for-bit today's Sackmann-only path. With no DOB on
+    the ref and no atp_id, the existing failure mode (PlayerResolutionError)
+    fires exactly as before the §T11 hook landed."""
+    players, aliases = FakePlayerRepo(), FakeAliasRepo()
+    r = _resolver(players, aliases, search_enricher=None)
+    r.register(_player(333, "Novak Djokovic", "3"))
+
+    with pytest.raises(PlayerResolutionError):
+        r.resolve(PlayerRef(name="N. Djokovic", source="sackmann"))
+    # And no alias was ever written for the unresolved reference name.
+    assert ("n djokovic", "sackmann") not in aliases.store
+
+
+def test_t11_enrich_returns_none_falls_through() -> None:
+    """A None enrich() return (404 / quota / parse error — absorbed in
+    the sidecar) must NOT raise; resolver continues to fuzzy / shadow."""
+    players, aliases = FakePlayerRepo(), FakeAliasRepo()
+    enricher = _FakeSearchEnricher(hit=None)
+    r = _resolver(players, aliases, search_enricher=enricher)
+    # No registered player, no atp_id, no DOB → existing failure path raises.
+    with pytest.raises(PlayerResolutionError):
+        r.resolve(PlayerRef(name="Unknown Player", source="sackmann"))
+    # The enricher was consulted (one call), and the resolver did NOT swallow
+    # the eventual PlayerResolutionError.
+    assert enricher.calls == ["Unknown Player"]

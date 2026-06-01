@@ -19,6 +19,7 @@ bugs only.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -34,13 +35,17 @@ from tennis.core.contracts import (
     AgentResult,
     ScraperAdapter,
 )
-from tennis.core.errors import SackmannStalenessError
+from tennis.core.errors import MatchstatTierMismatchError, SackmannStalenessError
 from tennis.core.lineage import AgentLineage, HeartbeatPolicy
 from tennis.core.logging import get_logger, redact_text
 from tennis.storage.postgres.repositories import VenueRepository
 from tennis.storage.postgres.rows import VenueRow
 
 if TYPE_CHECKING:
+    from tennis.adapters.matchstat.sidecars import (
+        MatchstatRankingsSeeder,
+        MatchstatVenueGeocoder,
+    )
     from tennis.adapters.odds.adapter import OddsApiAdapter
     from tennis.adapters.owm.adapter import OWMAdapter
     from tennis.adapters.sackmann.adapter import SackmannAdapter
@@ -88,6 +93,9 @@ class DataAgent:
         venues: VenueRepository,
         venue_coords_path: str | Path = _DEFAULT_VENUE_COORDS_PATH,
         scraper_required: bool = True,
+        matchstat_calendar_factory: Callable[[], "MatchstatVenueGeocoder"] | None = None,
+        matchstat_rankings_factory: Callable[[], "MatchstatRankingsSeeder"] | None = None,
+        pre_fetch_check: Callable[[], None] | None = None,
     ) -> None:
         self._sackmann_factory = sackmann_factory
         self._scraper_factory = scraper_factory
@@ -95,6 +103,19 @@ class DataAgent:
         self._owm_factory = owm_factory
         self._venues = venues
         self._venue_coords_path = venue_coords_path
+        # §T12 — optional matchstat calendar geocoder. When set, fires INSIDE
+        # `_step_geocode_venues` BEFORE the §L11 YAML pass so live coords win.
+        # The YAML remains as the safe fallback (§L11 keep-semantics).
+        self._matchstat_calendar_factory = matchstat_calendar_factory
+        # §T13 — optional matchstat rankings seeder. When set, fires BETWEEN
+        # `_step_odds` and `_step_owm` so §M11 `latest_before` finds today's
+        # Top-N for the prediction slate.
+        self._matchstat_rankings_factory = matchstat_rankings_factory
+        # §T5 — optional startup canary. When set, fires at the top of
+        # `_step_scraper` BEFORE `scraper.fetch()`. Composition wires this to
+        # `MatchstatClient.verify_tier_ids` so a renumbered TourRank id fails
+        # loud (§L2 partial), not silently miscategorized.
+        self._pre_fetch_check = pre_fetch_check
         # §S6a: the daily `run` requires the ATP scraper (it supplies the live
         # prediction slate). TRAINING does not — it consumes Sackmann `final`
         # history only — so the training chain builds the DataAgent with
@@ -142,10 +163,14 @@ class DataAgent:
         sackmann_ok = self._step_sackmann(ctx, sackmann, metrics, errors)
         ctx.heartbeat()
         odds_ok = self._step_odds(ctx, metrics, errors)
-        # Populate venue coords from the static YAML (§L11) BEFORE OWM enumerates
-        # venues via list_all(). Best-effort: never gates the run (no heartbeat of
-        # its own, so T8's beat count is unchanged).
-        self._step_geocode_venues()
+        # §T13 — seed today's Top-N rankings BETWEEN odds and OWM so §M11
+        # `latest_before` finds them for the prediction slate. Degrade-safe.
+        self._step_matchstat_rankings(ctx, metrics)
+        # Populate venue coords from the matchstat calendar (§T12) AND the
+        # static YAML (§L11) BEFORE OWM enumerates venues via list_all().
+        # Best-effort: never gates the run (no heartbeat of its own, so T8's
+        # beat count is unchanged).
+        self._step_geocode_venues(ctx, metrics)
         ctx.heartbeat()
         owm_ok = self._step_owm(ctx, metrics, errors)
 
@@ -168,6 +193,12 @@ class DataAgent:
         self, ctx: AgentContext, metrics: dict[str, Any], errors: list[AgentError]
     ) -> bool:
         try:
+            # §T5 startup canary — fail loud if matchstat's TourRank ids have
+            # silently been renumbered. Runs at most once per process via the
+            # lookup cache. A tier mismatch lands in _capture with its OWN code
+            # (below) so the operator can tell it apart from a scraper bug.
+            if self._pre_fetch_check is not None:
+                self._pre_fetch_check()
             scraper = self._scraper_factory(ctx.clock, ctx.run_id)
             r = scraper.fetch()
             metrics["atp_scraper"] = {
@@ -178,6 +209,13 @@ class DataAgent:
                 "required": self._scraper_required,
             }
             return r.complete
+        except MatchstatTierMismatchError as exc:
+            # §T5 — distinct code so triage sees the canary fire, not a generic
+            # `atp_scraper_error`. Same §L2 partial gating as below.
+            return _capture(
+                errors, metrics, "atp_scraper", "matchstat_tier_mismatch", exc,
+                {"matches_written": 0, "matches_skipped": 0},
+            )
         except Exception as exc:
             # §S6a: an UNEXPECTED scraper exception ALWAYS surfaces as an
             # AgentError (Data -> partial), in training too. The expected
@@ -281,16 +319,101 @@ class DataAgent:
                 {"venues_processed": 0, "venues_skipped": 0, "observations_upserted": 0},
             )
 
-    # -- venue geocoding pass (§L11) ----------------------------------------
-    def _step_geocode_venues(self) -> None:
-        """Idempotently upsert the static, manually-reviewed venue coordinates
-        (§L11) so the OWM step has coord-bearing venues to enumerate. Same-city
-        events collapse to one city-level venue (dedup on ``(city, country_code)``,
-        first-occurrence wins so the Grand-Slam coords listed first win).
+    # -- §T12 matchstat calendar (called inside _step_geocode_venues) -------
+    def _step_matchstat_calendar(
+        self, ctx: AgentContext, metrics: dict[str, Any]
+    ) -> None:
+        """§T12 — populate `venues.lat/lon` from matchstat's tournament
+        calendar BEFORE the §L11 YAML fallback. Degrade-safe: a missing
+        factory logs INFO and returns; any sidecar exception logs WARNING
+        and is recorded as `calendar_failures=1`. NEVER raises an
+        `AgentError`; never gates the §L2 status calculation."""
+        factory = self._matchstat_calendar_factory
+        if factory is None:
+            _logger.info("matchstat_calendar_skipped", reason="no_factory")
+            return
+        year = ctx.clock.now().date().year
+        bucket = metrics.setdefault("matchstat", {})
+        try:
+            sidecar = factory()
+            result = sidecar.populate(year=year)
+            bucket["calendar_venues_upserted"] = result.venues_upserted
+            bucket["calendar_failures"] = result.failures
+            _logger.info(
+                "matchstat_calendar_pass_complete",
+                year=year,
+                venues_upserted=result.venues_upserted,
+                failures=result.failures,
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade-safe per §T12
+            bucket["calendar_venues_upserted"] = 0
+            bucket["calendar_failures"] = 1
+            _logger.warning(
+                "matchstat_calendar_step_failed",
+                year=year,
+                error=_safe_cause(exc),
+            )
 
-        Best-effort by design: a missing or malformed YAML logs a warning and is
-        skipped — it must NEVER crash the daily run and is NOT an ``AgentError``.
-        OWM then falls through to the §L5 empty-venues path."""
+    # -- §T13 matchstat rankings (between odds and OWM) ---------------------
+    def _step_matchstat_rankings(
+        self, ctx: AgentContext, metrics: dict[str, Any]
+    ) -> None:
+        """§T13 — seed today's Top-N rankings into `player_rankings` so the
+        §M11 `latest_before` lookup finds them for the prediction slate.
+        Anchored to the current ISO-week Monday (UTC). Degrade-safe: a
+        missing factory logs INFO; any sidecar exception logs WARNING and
+        is recorded as `rankings_failures=1`. NEVER raises an
+        `AgentError`; never gates §L2."""
+        factory = self._matchstat_rankings_factory
+        if factory is None:
+            _logger.info("matchstat_rankings_skipped", reason="no_factory")
+            return
+        today = ctx.clock.now().date()
+        monday = today - timedelta(days=today.weekday())
+        bucket = metrics.setdefault("matchstat", {})
+        try:
+            sidecar = factory()
+            result = sidecar.populate(ranking_date=monday)
+            bucket["rankings_upserted"] = result.rows_upserted
+            bucket["rankings_skipped"] = result.rows_skipped
+            bucket["rankings_failures"] = result.failures
+            _logger.info(
+                "matchstat_rankings_pass_complete",
+                ranking_date=monday.isoformat(),
+                upserted=result.rows_upserted,
+                skipped=result.rows_skipped,
+                failures=result.failures,
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade-safe per §T13
+            bucket["rankings_upserted"] = 0
+            bucket["rankings_skipped"] = 0
+            bucket["rankings_failures"] = 1
+            _logger.warning(
+                "matchstat_rankings_step_failed",
+                ranking_date=monday.isoformat(),
+                error=_safe_cause(exc),
+            )
+
+    # -- venue geocoding pass (§T12 then §L11) ------------------------------
+    def _step_geocode_venues(
+        self, ctx: AgentContext, metrics: dict[str, Any]
+    ) -> None:
+        """Populate `venues.lat/lon` so OWM has coord-bearing venues to
+        enumerate. Layered:
+
+          1. §T12 — matchstat calendar (live coords for this season's
+             tournaments) when the optional sidecar is wired.
+          2. §L11 — static `venue_coords.yaml` (manually-reviewed,
+             generated once via `scripts/geocode_venues.py`) as the safe
+             fallback. Same-city events collapse on
+             ``(city, country_code)``, first-occurrence wins.
+
+        Best-effort by design: a missing/malformed YAML or a calendar
+        sidecar exception logs a warning and is skipped — it must NEVER
+        crash the daily run and is NOT an ``AgentError``. OWM then falls
+        through to the §L5 empty-venues path if no source produced coords.
+        """
+        self._step_matchstat_calendar(ctx, metrics)
         path = Path(self._venue_coords_path)
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))

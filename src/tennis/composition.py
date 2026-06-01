@@ -22,7 +22,9 @@ from tennis.adapters.http_client import HttpxClient
 from tennis.adapters.matchstat.adapter import MatchstatScraperAdapter
 from tennis.adapters.matchstat.client import MatchstatClient
 from tennis.adapters.matchstat.sidecars import (
+    MatchstatH2hStatsClient,
     MatchstatRankingsSeeder,
+    MatchstatSearchEnricher,
     MatchstatVenueGeocoder,
 )
 from tennis.adapters.odds.adapter import OddsApiAdapter
@@ -151,12 +153,21 @@ class _Wiring:
         reader = FilesystemMirrorReader(
             cfg.sources.sackmann.local_mirror_dir, cfg.sources.sackmann.files
         )
+        # §T11 — search enricher only when the matchstat key is configured.
+        # Training chains (no key) get None; the resolver then skips its §T11
+        # tier-extension and falls through to today's Sackmann-only path.
+        search_enricher: MatchstatSearchEnricher | None = (
+            MatchstatSearchEnricher(client=self._matchstat_client)
+            if self._matchstat_api_key is not None
+            else None
+        )
         resolver = SackmannResolver(
             players=self.players,
             aliases=self.aliases,
             fuzzy_threshold=cfg.player_resolution.fuzzy_threshold,
             require_dob_for_fuzzy=cfg.player_resolution.require_dob_for_fuzzy,
             overrides=load_overrides(cfg.player_resolution.overrides_file),
+            search_enricher=search_enricher,
         )
 
         def _make(clock: Clock, run_id: UUID) -> SackmannAdapter:
@@ -221,6 +232,16 @@ class _Wiring:
 
         return _make
 
+    def _h2h_stats_client(self) -> MatchstatH2hStatsClient | None:
+        """§T14 — build the shared matchstat h2h-stats client once per
+        ResearchAgent. The sidecar's per-pair cache must survive the full
+        per-match loop, so one instance per agent (not per match) is the
+        right scope. Returns None when no matchstat key is configured (the
+        H2HExtractor then emits all 6 §T14 keys as NULL)."""
+        if self._matchstat_api_key is None:
+            return None
+        return MatchstatH2hStatsClient(client=self._matchstat_client)
+
     def _odds_factory(self):
         cfg = self._config
         client = HttpOddsApiClient(
@@ -268,6 +289,21 @@ class _Wiring:
 
     # -- agents -------------------------------------------------------------
     def data_agent(self, *, scraper_required: bool = True) -> DataAgent:
+        # §T5 — the pre-fetch tier-id canary is wired only when a key is
+        # configured (training chains have no key; matchstat is skipped there).
+        pre_fetch_check = (
+            self._matchstat_client.verify_tier_ids
+            if self._matchstat_api_key is not None
+            else None
+        )
+        # §T12 / §T13 — sidecar factories wired only when a key is present.
+        # Absent key → DataAgent silently skips the steps (degrade-safe).
+        if self._matchstat_api_key is not None:
+            calendar_factory = self._matchstat_calendar_factory()
+            rankings_factory = self._matchstat_rankings_factory()
+        else:
+            calendar_factory = None
+            rankings_factory = None
         return DataAgent(
             config=self._config,
             sackmann_factory=self._sackmann_factory(),
@@ -276,6 +312,9 @@ class _Wiring:
             owm_factory=self._owm_factory(),
             venues=self.venues,
             scraper_required=scraper_required,
+            matchstat_calendar_factory=calendar_factory,
+            matchstat_rankings_factory=rankings_factory,
+            pre_fetch_check=pre_fetch_check,
         )
 
     def research_agent(self, *, mode: Literal["training", "prediction"]) -> ResearchAgent:
@@ -293,6 +332,7 @@ class _Wiring:
             feature_spec_repo=self.feature_specs,
             feature_matrix_repo=self.feature_matrix,
             dead_letter=self.dead_letter,
+            h2h_stats_client=self._h2h_stats_client(),
         )
 
     def modeling_agent(self, *, mode: Literal["training", "prediction"]) -> ModelingAgent:
@@ -324,11 +364,16 @@ class _Wiring:
         )
 
     def monitor_agent(self) -> MonitorAgent:
+        # §T6 — share the singleton matchstat client so the §Q6 envelope can
+        # surface quota_remaining/monthly_quota. The client exists in _Wiring
+        # even when api_key is None; the agent's read is best-effort and
+        # never gates the monitor write.
         return MonitorAgent(
             config=self._config,
             model_registry_repo=self.model_registry,
             prediction_repo=self.predictions,
             match_repo=self.matches,
+            matchstat_client=self._matchstat_client,
         )
 
     def pipeline(self, agents: list[Agent]) -> DailyPipeline:

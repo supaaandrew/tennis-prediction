@@ -712,3 +712,316 @@ class TestVenueGeocodingPass:
             "venue_coords_load_failed", path=str(missing), reason="missing"
         )
         assert result.ok is True  # missing coords degrades to §L5, not a failure
+
+
+# ---------------------------------------------------------------------------
+# §T-2 sidecar wiring — calendar, rankings, pre-fetch tier-id canary
+# ---------------------------------------------------------------------------
+from dataclasses import dataclass  # noqa: E402 — local-only
+
+
+@dataclass(frozen=True)
+class _GeoResult:
+    venues_upserted: int
+    failures: int
+
+
+@dataclass(frozen=True)
+class _RankResult:
+    rows_upserted: int
+    rows_skipped: int
+    failures: int
+
+
+class _FakeCalendar:
+    def __init__(self, *, result: _GeoResult | None = None, exc: Exception | None = None) -> None:
+        self._result = result or _GeoResult(venues_upserted=3, failures=0)
+        self._exc = exc
+        self.populate_calls: list[int] = []
+
+    def populate(self, *, year: int) -> _GeoResult:
+        self.populate_calls.append(year)
+        if self._exc is not None:
+            raise self._exc
+        return self._result
+
+
+class _FakeRankings:
+    def __init__(self, *, result: _RankResult | None = None, exc: Exception | None = None) -> None:
+        self._result = result or _RankResult(rows_upserted=100, rows_skipped=4, failures=0)
+        self._exc = exc
+        self.populate_calls: list[date] = []
+
+    def populate(self, *, ranking_date: date) -> _RankResult:
+        self.populate_calls.append(ranking_date)
+        if self._exc is not None:
+            raise self._exc
+        return self._result
+
+
+def _build_with_sidecars(
+    config: AppConfig, *,
+    sackmann: _FakeSackmann, scraper: _FakeScraper,
+    odds: _FakeOdds, owm: _FakeOwm, venues: _FakeVenues,
+    calendar: _FakeCalendar | None = None,
+    rankings: _FakeRankings | None = None,
+    pre_fetch_check: Callable[[], None] | None = None,
+    venue_coords_path: str | Path = _NO_COORDS,
+    scraper_required: bool = True,
+) -> tuple[DataAgent, dict[str, _Factory]]:
+    factories = {
+        "sackmann": _Factory(sackmann),
+        "scraper": _Factory(scraper),
+        "odds": _Factory(odds),
+        "owm": _Factory(owm),
+    }
+    agent = DataAgent(
+        config=config,
+        sackmann_factory=factories["sackmann"],  # type: ignore[arg-type]
+        scraper_factory=factories["scraper"],  # type: ignore[arg-type]
+        odds_factory=factories["odds"],  # type: ignore[arg-type]
+        owm_factory=factories["owm"],  # type: ignore[arg-type]
+        venues=venues,  # type: ignore[arg-type]
+        venue_coords_path=venue_coords_path,
+        scraper_required=scraper_required,
+        matchstat_calendar_factory=(lambda: calendar) if calendar is not None else None,
+        matchstat_rankings_factory=(lambda: rankings) if rankings is not None else None,
+        pre_fetch_check=pre_fetch_check,
+    )
+    return agent, factories
+
+
+# A date import in scope for the rankings/Monday tests.
+from datetime import date  # noqa: E402
+
+
+class TestT12CalendarStep:
+    def test_calendar_runs_before_yaml_and_populates_metric(
+        self, config: AppConfig, tmp_path: Path
+    ) -> None:
+        """Order assertion + metrics envelope: calendar runs INSIDE
+        _step_geocode_venues BEFORE the §L11 YAML pass; success records
+        calendar_venues_upserted + calendar_failures."""
+        yaml_path = tmp_path / "venue_coords.yaml"
+        yaml_path.write_text(_VENUE_YAML, encoding="utf-8")
+        calls: list[tuple[str, str]] = []
+        calendar = _FakeCalendar(result=_GeoResult(venues_upserted=7, failures=0))
+        owm = _FakeOwm(calls=calls, result=ForecastResult(
+            venues_processed=2, venues_skipped=0, observations_upserted=4,
+            horizon_skipped=0, failures=0))
+        venues = _FakeVenues([])
+        agent, _ = _build_with_sidecars(
+            config, venues=venues,
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=_FakeScraper(calls=calls),
+            odds=_FakeOdds(calls=calls),
+            owm=owm,
+            calendar=calendar,
+            venue_coords_path=yaml_path,
+        )
+        result = agent.run(_ctx(config))
+
+        assert calendar.populate_calls == [_AS_OF.year]
+        # Calendar produced metrics; status not affected by calendar.
+        assert result.metrics["matchstat"]["calendar_venues_upserted"] == 7
+        assert result.metrics["matchstat"]["calendar_failures"] == 0
+        # YAML pass still ran (Wimbledon + Gstaad upserted in addition).
+        assert {v.city for v in venues.upserted} == {"London", "Gstaad"}
+
+    def test_calendar_factory_none_silently_skips(
+        self, config: AppConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_logger = MagicMock()
+        monkeypatch.setattr("tennis.agents.data.agent._logger", mock_logger)
+        calls: list[tuple[str, str]] = []
+        agent, _ = _build_with_sidecars(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=_FakeScraper(calls=calls),
+            odds=_FakeOdds(calls=calls),
+            owm=_FakeOwm(calls=calls),
+            calendar=None,
+        )
+        result = agent.run(_ctx(config))
+        assert "matchstat" not in result.metrics  # nothing wrote to the bucket
+        mock_logger.info.assert_any_call(
+            "matchstat_calendar_skipped", reason="no_factory"
+        )
+
+    def test_calendar_exception_warns_and_records_failure_no_agent_error(
+        self, config: AppConfig
+    ) -> None:
+        """A sidecar exception must NEVER produce an AgentError — degrade
+        to a structured WARN + `calendar_failures=1`. §L2 calc unchanged."""
+        calls: list[tuple[str, str]] = []
+        calendar = _FakeCalendar(exc=RuntimeError("matchstat unavailable"))
+        agent, _ = _build_with_sidecars(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=_FakeScraper(calls=calls),
+            odds=_FakeOdds(calls=calls),
+            owm=_FakeOwm(calls=calls),
+            calendar=calendar,
+        )
+        result = agent.run(_ctx(config))
+        assert result.errors == ()  # NOT an AgentError
+        assert result.metrics["matchstat"]["calendar_failures"] == 1
+        assert result.metrics["matchstat"]["calendar_venues_upserted"] == 0
+        # §L2 still proceeds; result.ok stays True (other steps clean).
+        assert result.ok is True
+
+
+class TestT13RankingsStep:
+    def test_rankings_runs_between_odds_and_owm(self, config: AppConfig) -> None:
+        """Step ordering: rankings fires AFTER odds, BEFORE owm.
+        Asserts via the shared `calls` log so an accidental move of the
+        rankings step (e.g. before odds or after OWM) fails this test."""
+        calls: list[tuple[str, str]] = []
+        # A wrapper rankings sidecar that appends to the SAME `calls` list,
+        # so we can assert "odds before rankings before owm" via call order.
+        class _OrderedRankings:
+            def __init__(self) -> None:
+                self.populate_calls: list[date] = []
+            def populate(self, *, ranking_date: date):  # type: ignore[no-untyped-def]
+                calls.append(("rankings", "populate"))
+                self.populate_calls.append(ranking_date)
+                return _RankResult(rows_upserted=100, rows_skipped=4, failures=0)
+        rankings = _OrderedRankings()
+        agent, _ = _build_with_sidecars(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=_FakeScraper(calls=calls),
+            odds=_FakeOdds(calls=calls),
+            owm=_FakeOwm(calls=calls),
+            rankings=rankings,  # type: ignore[arg-type]
+        )
+        result = agent.run(_ctx(config))
+        # Call ordering — the actual gate on §T13 placement.
+        i_odds = calls.index(("odds", "fetch_upcoming"))
+        i_rank = calls.index(("rankings", "populate"))
+        i_owm = calls.index(("owm", "fetch_forecasts"))
+        assert i_odds < i_rank < i_owm
+        # Metrics envelope still populated.
+        assert len(rankings.populate_calls) == 1
+        assert result.metrics["matchstat"]["rankings_upserted"] == 100
+        assert result.metrics["matchstat"]["rankings_skipped"] == 4
+
+    def test_rankings_monday_derivation_from_non_monday_clock(
+        self, config: AppConfig
+    ) -> None:
+        """_AS_OF is 2026-05-24 = Sunday; the ISO-week Monday is 2026-05-18."""
+        calls: list[tuple[str, str]] = []
+        rankings = _FakeRankings()
+        agent, _ = _build_with_sidecars(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=_FakeScraper(calls=calls),
+            odds=_FakeOdds(calls=calls),
+            owm=_FakeOwm(calls=calls),
+            rankings=rankings,
+        )
+        agent.run(_ctx(config))
+        assert rankings.populate_calls == [date(2026, 5, 18)]
+
+    def test_rankings_factory_none_skips_no_metric(
+        self, config: AppConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_logger = MagicMock()
+        monkeypatch.setattr("tennis.agents.data.agent._logger", mock_logger)
+        calls: list[tuple[str, str]] = []
+        agent, _ = _build_with_sidecars(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=_FakeScraper(calls=calls),
+            odds=_FakeOdds(calls=calls),
+            owm=_FakeOwm(calls=calls),
+            rankings=None,
+        )
+        agent.run(_ctx(config))
+        mock_logger.info.assert_any_call(
+            "matchstat_rankings_skipped", reason="no_factory"
+        )
+
+    def test_rankings_exception_warns_and_records_failure(
+        self, config: AppConfig
+    ) -> None:
+        calls: list[tuple[str, str]] = []
+        rankings = _FakeRankings(exc=RuntimeError("matchstat 500"))
+        agent, _ = _build_with_sidecars(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=_FakeScraper(calls=calls),
+            odds=_FakeOdds(calls=calls),
+            owm=_FakeOwm(calls=calls),
+            rankings=rankings,
+        )
+        result = agent.run(_ctx(config))
+        assert result.errors == ()
+        assert result.metrics["matchstat"]["rankings_failures"] == 1
+        assert result.metrics["matchstat"]["rankings_upserted"] == 0
+
+
+class TestT5PreFetchCheck:
+    def test_pre_fetch_check_runs_before_scraper_fetch(self, config: AppConfig) -> None:
+        """The canary must fire BEFORE scraper.fetch() so a renumbered tier
+        id never silently corrupts a slate."""
+        calls: list[tuple[str, str]] = []
+        order: list[str] = []
+
+        def pre_check() -> None:
+            order.append("pre_check")
+
+        original_fetch = _FakeScraper.fetch
+
+        def tracked_fetch(self):  # type: ignore[no-untyped-def]
+            order.append("fetch")
+            return original_fetch(self)
+
+        scraper = _FakeScraper(calls=calls)
+        scraper.fetch = tracked_fetch.__get__(scraper, _FakeScraper)  # type: ignore[assignment]
+
+        agent, _ = _build_with_sidecars(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=scraper,
+            odds=_FakeOdds(calls=calls),
+            owm=_FakeOwm(calls=calls),
+            pre_fetch_check=pre_check,
+        )
+        result = agent.run(_ctx(config))
+        assert order == ["pre_check", "fetch"]
+        assert result.ok is True
+
+    def test_pre_fetch_check_failure_drops_data_to_partial(
+        self, config: AppConfig
+    ) -> None:
+        """A pre-fetch `MatchstatTierMismatchError` lands in the §L2 _capture
+        path under its OWN distinct code, NOT the generic `atp_scraper_error`
+        — so operators can tell a tier renumbering canary apart from a
+        scraper bug. Data drops to partial; other steps still run."""
+        from tennis.core.errors import MatchstatTierMismatchError
+
+        calls: list[tuple[str, str]] = []
+
+        def pre_check() -> None:
+            raise MatchstatTierMismatchError(
+                "matchstat tier id 2 maps to 'Renamed Tier', expected one of [...]"
+            )
+
+        agent, _ = _build_with_sidecars(
+            config, venues=_FakeVenues([]),
+            sackmann=_FakeSackmann(calls=calls),
+            scraper=_FakeScraper(calls=calls),
+            odds=_FakeOdds(calls=calls),
+            owm=_FakeOwm(calls=calls),
+            pre_fetch_check=pre_check,
+        )
+        result = agent.run(_ctx(config))
+        assert result.ok is False
+        codes = {e.code for e in result.errors}
+        assert codes == {"matchstat_tier_mismatch"}  # distinct from generic scraper bug
+        # The scraper.fetch() was NOT called (pre-check raised first).
+        assert ("scraper", "fetch") not in calls
+        # Other adapters still ran.
+        assert ("sackmann", "ingest_players") in calls
+        assert ("odds", "fetch_upcoming") in calls

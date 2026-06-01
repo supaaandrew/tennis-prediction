@@ -34,6 +34,7 @@ from typing import Any
 import yaml
 from rapidfuzz import fuzz, process
 
+from tennis.adapters.matchstat.sidecars import MatchstatSearchEnricher
 from tennis.core.errors import PlayerResolutionError
 from tennis.core.ids import normalize_player_name, player_id_from_source
 from tennis.core.logging import get_logger
@@ -112,6 +113,7 @@ class SackmannResolver:
         fuzzy_threshold: float = 0.92,
         require_dob_for_fuzzy: bool = True,
         overrides: Iterable[OverrideEntry] = (),
+        search_enricher: MatchstatSearchEnricher | None = None,
     ) -> None:
         self._players = players
         self._aliases = aliases
@@ -120,6 +122,13 @@ class SackmannResolver:
         self._overrides: dict[tuple[str, str], OverrideEntry] = {
             (o.alias, o.source): o for o in overrides
         }
+        # §T11 — optional DOB+country enrichment via matchstat. When set, a
+        # reference whose Tier-2 misses AND whose `ref.dob` is None gets one
+        # `enricher.enrich(name=…)` shot; on a hit we re-do the §C2 index
+        # lookup with the enriched DOB+country (no fuzzy fall-back). The
+        # enricher absorbs quota / 404 / transport errors as None so the
+        # resolver never sees `MatchstatQuotaExhaustedError` here.
+        self._search_enricher = search_enricher
         # In-memory candidate indexes for tiers 2 and 3.
         self._dob_country_index: dict[tuple[date, str], list[int]] = defaultdict(list)
         self._fuzzy_entries: list[tuple[str, int, date | None]] = []
@@ -207,6 +216,37 @@ class SackmannResolver:
                     country_code=ref.country_code,
                 )
                 return pid
+
+        # Tier 2-extension §T11 — matchstat search enrichment. Triggers when
+        # the reference lacks the DOB we'd need to drive Tier 2 (and which
+        # would short-circuit Tier 3 anyway under `require_dob_for_fuzzy`).
+        # On a confident hit (DOB+country resolve to exactly one player in
+        # the in-memory index), lock at Tier 2 with `confidence='exact'`.
+        # Any divergence (0 or 2+ candidates) falls through without writing
+        # the alias — the divergence itself is the "different player despite
+        # name match" signal that §T11 carries.
+        if self._search_enricher is not None and ref.dob is None:
+            hit = self._search_enricher.enrich(name=ref.name)
+            if (
+                hit is not None
+                and hit.birthday is not None
+                and hit.countryAcr
+            ):
+                country = hit.countryAcr.upper()
+                candidates = self._dob_country_index.get(
+                    (hit.birthday, country), []
+                )
+                if len(candidates) == 1:
+                    pid = candidates[0]
+                    self._upsert_alias(
+                        alias=norm,
+                        source=ref.source,
+                        player_id=pid,
+                        confidence="exact",
+                        dob=hit.birthday,
+                        country_code=country,
+                    )
+                    return pid
 
         # Tier 3 — fuzzy.
         pid = self._fuzzy_resolve(norm, ref)

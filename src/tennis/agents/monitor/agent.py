@@ -35,13 +35,16 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime, time, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tennis.core.config import AppConfig
 from tennis.core.contracts import AgentContext, AgentError, AgentResult
 from tennis.core.errors import StorageError
 from tennis.core.lineage import AgentLineage, HeartbeatPolicy
 from tennis.core.logging import get_logger, redact_text
+
+if TYPE_CHECKING:
+    from tennis.adapters.matchstat.client import MatchstatClient
 from tennis.models.metrics import (
     expected_calibration_error,
     population_stability_index,
@@ -69,11 +72,16 @@ class MonitorAgent:
         model_registry_repo: ModelRegistryRepository,
         prediction_repo: PredictionRepository,
         match_repo: MatchRepository,
+        matchstat_client: "MatchstatClient | None" = None,
     ) -> None:
         self._config = config
         self._model_registry_repo = model_registry_repo
         self._prediction_repo = prediction_repo
         self._match_repo = match_repo
+        # §T6 — optional matchstat client for the quota-burn metric folded into
+        # the §Q6 envelope. Best-effort: a failing read logs WARN and leaves the
+        # envelope unchanged so monitor write is never gated by it.
+        self._matchstat_client = matchstat_client
 
         hb = config.orchestrator.heartbeat
         # §Q7 / A13: the Monitor runs post-briefing REGARDLESS of upstream status,
@@ -253,18 +261,36 @@ class MonitorAgent:
         )
         return None
 
-    @staticmethod
     def _metrics_envelope(
+        self,
         model_version: str | None,
         as_of: datetime,
         *,
         windows: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        return {
+        envelope: dict[str, Any] = {
             "model_version": model_version,
             "as_of": as_of.isoformat(),
             "windows": windows,
         }
+        # §T6 — best-effort matchstat quota-burn metric. Read BOTH properties
+        # before mutating the envelope so a half-populated sub-dict can never
+        # land if the second read raises. A failure logs WARN and leaves the
+        # envelope unchanged — the §Q6 shape stays the same with or without it.
+        if self._matchstat_client is not None:
+            try:
+                quota_remaining = self._matchstat_client.quota_remaining
+                monthly_quota = self._matchstat_client.monthly_quota
+                envelope["matchstat"] = {
+                    "quota_remaining": quota_remaining,
+                    "monthly_quota": monthly_quota,
+                }
+            except Exception as exc:  # noqa: BLE001 — never block monitor write
+                _logger.warning(
+                    "monitor_matchstat_metric_failed",
+                    error=type(exc).__name__,
+                )
+        return envelope
 
 
 # ---------------------------------------------------------------------------

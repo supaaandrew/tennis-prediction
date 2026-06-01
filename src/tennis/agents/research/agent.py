@@ -38,7 +38,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from tennis.adapters.matchstat.sidecars import MatchstatH2hStatsClient
 
 from tennis.core.config import AppConfig
 from tennis.core.contracts import AgentContext, AgentError, AgentResult
@@ -102,6 +105,10 @@ class _ExtractorDeps:
     weather_repo: WeatherObservationRepository
     venue_repo: VenueRepository
     odds_repo: OddsSnapshotRepository
+    # §T14 — optional shared matchstat h2h-stats client. The sidecar's per-pair
+    # cache must live across the full per-match loop (built once per run by
+    # composition and shared with the H2HExtractor factory).
+    h2h_stats_client: "MatchstatH2hStatsClient | None" = None
 
 
 ExtractorFactory = Callable[[_ExtractorDeps], FeatureExtractor]
@@ -115,7 +122,8 @@ _ORDINARY_FAMILY_FACTORIES: tuple[tuple[str, ExtractorFactory], ...] = (
     ("rankings", lambda d: RankingsExtractor(ranking_repo=d.ranking_repo, config=d.config)),
     ("form", lambda d: FormExtractor(history=d.history, config=d.config)),
     ("h2h", lambda d: H2HExtractor(
-        history=d.history, tournament_repo=d.tournament_repo, config=d.config)),
+        history=d.history, tournament_repo=d.tournament_repo, config=d.config,
+        h2h_stats_client=d.h2h_stats_client)),
     ("surface", lambda d: SurfaceExtractor(
         history=d.history, tournament_repo=d.tournament_repo, config=d.config)),
     ("serve_return", lambda d: ServeReturnExtractor(
@@ -153,6 +161,7 @@ class ResearchAgent:
         feature_matrix_repo: FeatureMatrixRepository,
         dead_letter: DeadLetterRepository,
         extractor_factories: Sequence[tuple[str, ExtractorFactory]] = _ORDINARY_FAMILY_FACTORIES,
+        h2h_stats_client: "MatchstatH2hStatsClient | None" = None,
     ) -> None:
         if mode not in ("training", "prediction"):
             raise ValueError(f"ResearchAgent: unknown mode {mode!r}")
@@ -170,6 +179,9 @@ class ResearchAgent:
         self._feature_matrix_repo = feature_matrix_repo
         self._dead_letter = dead_letter
         self._factories = tuple(extractor_factories)
+        # §T14 — optional matchstat clutch H2H. None for training-only chains
+        # (no key) — the H2HExtractor then emits all 6 clutch keys as NULL.
+        self._h2h_stats_client = h2h_stats_client
         # Active families = elo + the ordinary factories, in catalog order. Drives
         # both seeding and the validator's expected_specs so they never diverge.
         self._families: tuple[str, ...] = (ELO_FAMILY,) + tuple(
@@ -330,6 +342,7 @@ class ResearchAgent:
             weather_repo=self._weather_repo,
             venue_repo=self._venue_repo,
             odds_repo=self._odds_repo,
+            h2h_stats_client=self._h2h_stats_client,
         )
         return [factory(deps) for _, factory in self._factories]
 

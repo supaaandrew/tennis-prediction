@@ -449,3 +449,100 @@ class TestScopingAndFailures:
         db_repo = _FakePredictionRepo([], raise_exc=StorageError(_SECRET_DSN))
         fail_agent = _make_agent(cfg, active=_model_row(), prediction_repo=db_repo)
         assert DailyPipeline._map_status(fail_agent.run(_ctx(cfg))) == "failed"
+
+
+# ---------------------------------------------------------------------------
+# §T6 — matchstat quota-burn metric in the §Q6 envelope
+# ---------------------------------------------------------------------------
+class _FakeMatchstatClient:
+    """Records property reads; programmable to return values OR raise."""
+
+    def __init__(
+        self,
+        *,
+        quota_remaining: int = 481,
+        monthly_quota: int = 500,
+        raise_on_read: bool = False,
+    ) -> None:
+        self._qr = quota_remaining
+        self._mq = monthly_quota
+        self._raise = raise_on_read
+        self.read_count = 0
+
+    @property
+    def quota_remaining(self) -> int:
+        self.read_count += 1
+        if self._raise:
+            raise RuntimeError("simulated quota-read failure")
+        return self._qr
+
+    @property
+    def monthly_quota(self) -> int:
+        return self._mq
+
+
+def _make_agent_with_ms(
+    config, *, active=None, preds=(), matches=(),
+    matchstat_client=None,
+):
+    return MonitorAgent(
+        config=config,
+        model_registry_repo=_FakeRegistry(active),
+        prediction_repo=_FakePredictionRepo(preds),
+        match_repo=_FakeMatchRepo(matches),
+        matchstat_client=matchstat_client,
+    )
+
+
+class TestT6MatchstatEnvelope:
+    def test_envelope_carries_quota_remaining_when_client_set(self, base_config):
+        cfg = _single_window_config(base_config, 30)
+        ms = _FakeMatchstatClient(quota_remaining=481, monthly_quota=500)
+        agent = _make_agent_with_ms(
+            cfg, active=_model_row(),
+            preds=[_pred(1, predicted_at=_CURRENT_TS)],
+            matches=[_match(1, winner="p1")],
+            matchstat_client=ms,
+        )
+        result = agent.run(_ctx(cfg))
+        assert "matchstat" in result.metrics
+        assert result.metrics["matchstat"] == {
+            "quota_remaining": 481,
+            "monthly_quota": 500,
+        }
+        assert ms.read_count >= 1
+
+    def test_envelope_omits_matchstat_when_client_is_none(self, base_config):
+        cfg = _single_window_config(base_config, 30)
+        agent = _make_agent_with_ms(
+            cfg, active=_model_row(),
+            preds=[_pred(1, predicted_at=_CURRENT_TS)],
+            matches=[_match(1, winner="p1")],
+            matchstat_client=None,
+        )
+        result = agent.run(_ctx(cfg))
+        assert "matchstat" not in result.metrics
+        # §Q6 envelope shape unchanged (model_version, as_of, windows).
+        assert set(result.metrics) == {"model_version", "as_of", "windows"}
+
+    def test_matchstat_read_failure_logs_warn_and_envelope_unchanged(
+        self, base_config
+    ) -> None:
+        """A failing matchstat property read must NEVER block the monitor
+        write — best-effort: warn + omit the `matchstat` key entirely so
+        the §Q6 envelope shape stays the same."""
+        cfg = _single_window_config(base_config, 30)
+        ms = _FakeMatchstatClient(raise_on_read=True)
+        agent = _make_agent_with_ms(
+            cfg, active=_model_row(),
+            preds=[_pred(1, predicted_at=_CURRENT_TS)],
+            matches=[_match(1, winner="p1")],
+            matchstat_client=ms,
+        )
+        result = agent.run(_ctx(cfg))
+        assert "matchstat" not in result.metrics
+        # Run still succeeded / partial on its own merits — never failed by the
+        # matchstat read.
+        assert result.errors == () or {e.code for e in result.errors} == {
+            "monitor_partial"
+        }

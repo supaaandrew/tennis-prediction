@@ -189,3 +189,58 @@ class TestTrainingScopedValidation:
         # The daily chain in prod DOES require them → fails loudly.
         with pytest.raises(MissingEnvironmentError):
             build_daily_chain(prod, session_factory=_fake_session_factory())
+
+
+class TestT2SidecarConsumers:
+    """§T-2 — composition wires all four sidecar consumers into the agent
+    graph when the matchstat key is configured (daily chain), and skips
+    them silently when absent (training chain)."""
+
+    def test_daily_chain_threads_all_four_consumers(
+        self, config: AppConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tennis.adapters.matchstat.client import MatchstatClient
+        from tennis.adapters.matchstat.sidecars import MatchstatH2hStatsClient
+
+        _set_all_secrets(monkeypatch, config)
+        pipeline = build_daily_chain(config, session_factory=_fake_session_factory())
+        data, research, _modeling, _briefing, monitor = pipeline._agents
+        # §T12 / §T13 — DataAgent receives both sidecar factories.
+        assert data._matchstat_calendar_factory is not None
+        assert data._matchstat_rankings_factory is not None
+        # §T5 — pre-fetch check wired to MatchstatClient.verify_tier_ids.
+        assert data._pre_fetch_check is not None
+        # §T14 — ResearchAgent receives the shared h2h-stats client.
+        assert isinstance(research._h2h_stats_client, MatchstatH2hStatsClient)
+        # §T6 — Monitor receives the SAME singleton matchstat client.
+        assert isinstance(monitor._matchstat_client, MatchstatClient)
+
+    def test_training_chain_skips_matchstat_consumers(
+        self, config: AppConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Training has no key; the four consumers are all None / unwired.
+        Each absent consumer is documented degrade-safe at its site."""
+        prod = config.model_copy(
+            update={"app": config.app.model_copy(update={"env": "prod"})}
+        )
+        # Only DB + the two source-adapter keys are present (and NO matchstat key).
+        monkeypatch.setenv(prod.database.url_env, "postgresql+psycopg://u:p@h:5432/db")
+        monkeypatch.setenv(prod.sources.odds_api.api_key_env, "odds")
+        monkeypatch.setenv(prod.sources.openweather.api_key_env, "owm")
+        for name in (
+            prod.briefing.llm.api_key_env,
+            prod.briefing.email.smtp.host_env,
+            prod.briefing.email.smtp.user_env,
+            prod.briefing.email.smtp.password_env,
+            prod.briefing.email.recipients_env,
+            prod.sources.matchstat.api_key_env,
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        pipeline = build_training_chain(prod, session_factory=_fake_session_factory())
+        data, research, _modeling = pipeline._agents
+        # All four sidecar surfaces are None / unwired.
+        assert data._matchstat_calendar_factory is None
+        assert data._matchstat_rankings_factory is None
+        assert data._pre_fetch_check is None
+        assert research._h2h_stats_client is None

@@ -43,6 +43,11 @@ _TIER_NAME_TO_ENUM: dict[str, Tier] = {
     "ATP250": "ATP250",
 }
 
+# §T5 — exposed for `MatchstatClient.verify_tier_ids()`: the set of upstream
+# `rank.name` strings we know how to map. A configured `tier_id` whose live
+# `/ranks` name is NOT in this set is a renumbering signal and must fail loud.
+_EXPECTED_TIER_NAMES: frozenset[str] = frozenset(_TIER_NAME_TO_ENUM.keys())
+
 # Court name → Surface enum. The free tier uses these strings verbatim.
 _SURFACE_NAME_TO_ENUM: dict[str, Surface] = {
     "Hard": "Hard",

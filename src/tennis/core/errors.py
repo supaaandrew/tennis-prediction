@@ -74,6 +74,18 @@ class MatchstatAuthError(AdapterError):
     """
 
 
+class MatchstatTierMismatchError(ConfigError):
+    """Matchstat's `/ranks` lookup returned a name we don't recognize for one
+    of the configured `tier_ids` (§T5 startup canary).
+
+    The `config.sources.matchstat.tier_ids` tuple is fed verbatim into the
+    fixtures `filter=TourRank:…` expression, so if matchstat ever renumbers
+    its `Grand Slam` / `Masters 1000` / `ATP 500` / `ATP 250` ids the daily
+    slate would silently miscategorize. Raised at DataAgent startup so the
+    §L2 gate drops Data to `partial` instead.
+    """
+
+
 class MatchstatQuotaExhaustedError(AdapterError):
     """Matchstat free-tier monthly quota (500/month) has been exhausted (§T6).
 
