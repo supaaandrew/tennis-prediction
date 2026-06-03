@@ -1,6 +1,6 @@
 # Tennis Prediction Bot
 
-A 4-agent pipeline that predicts ATP men's singles outcomes and surfaces edges against bookmaker implied probabilities. Runs on a daily 06:30 UTC cron, writes everything to Postgres, and emails a per-match brief with calibrated probabilities, Shin-adjusted edges, and fractional-Kelly sizing.
+A 4-agent pipeline that predicts ATP men's singles outcomes and surfaces edges against bookmaker implied probabilities. Uses elo, rankings, form, weather, market, etc. features for robust prediction Runs on a daily 06:30 UTC cron, writes everything to Postgres, and emails a per-match brief with calibrated probabilities, Shin-adjusted edges, and fractional-Kelly sizing.
 
 Built end-to-end. 1,321 unit tests.
 
