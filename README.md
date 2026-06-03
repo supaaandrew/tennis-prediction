@@ -2,7 +2,7 @@
 
 A 4-agent pipeline that predicts ATP men's singles outcomes and surfaces edges against bookmaker implied probabilities. Runs on a daily 06:30 UTC cron, writes everything to Postgres, and emails a per-match brief with calibrated probabilities, Shin-adjusted edges, and fractional-Kelly sizing.
 
-Built end-to-end. 1,321 unit tests, all green.
+Built end-to-end. 1,321 unit tests.
 
 ---
 
@@ -28,7 +28,7 @@ DataAgent ──► ResearchAgent ──► ModelingAgent ──► BriefingAgen
    ingest         features          scoring           email          drift
 ```
 
-Postgres is the message bus. Each stage is a separate `pipeline_runs` row keyed `(run_id, agent, attempt)`; all five share one `run_id` per day. Stages read what the prior stage wrote — there is no in-memory hand-off. Monitor runs regardless of upstream status; everything else is gated by an explicit `Precondition` on the predecessor's terminal status.
+Postgres is the message carrier. Each stage is a separate `pipeline_runs` row keyed `(run_id, agent, attempt)`; all five share one `run_id` per day. Stages read what the prior stage wrote — there is no in-memory hand-off. Monitor runs regardless of upstream status; everything else is gated by an explicit `Precondition` on the predecessor's terminal status.
 
 - **Run lineage:** heartbeats every 30s, orphan-sweep at 300s, cluster-wide advisory lock so two crons can't double-run.
 - **Fault isolation:** per-match failures dead-letter; per-adapter failures degrade the run to `partial` rather than killing it. Only true preflight errors (staleness, DB-down) fail the run.
